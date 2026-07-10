@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Once, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -757,15 +758,30 @@ fn restore_desktop_wallpaper() {
             Some(path.as_mut_ptr().cast()),
             SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
         )
-        .is_ok()
+        .is_err()
         {
-            let _ = SystemParametersInfoW(
-                SPI_SETDESKWALLPAPER,
-                0,
-                Some(path.as_mut_ptr().cast()),
-                SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
-            );
+            return;
         }
+    }
+    // Re-applying makes Windows reload the file from disk. If the registry
+    // points at a deleted file (or is empty for slideshow/Spotlight setups),
+    // that reload CLEARS the wallpaper the user still sees from the cache —
+    // in that case doing nothing is the correct restore.
+    let length = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+    if length == 0 {
+        return;
+    }
+    let current = PathBuf::from(String::from_utf16_lossy(&path[..length]));
+    if !current.is_file() {
+        return;
+    }
+    unsafe {
+        let _ = SystemParametersInfoW(
+            SPI_SETDESKWALLPAPER,
+            0,
+            Some(path.as_mut_ptr().cast()),
+            SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
+        );
     }
 }
 
