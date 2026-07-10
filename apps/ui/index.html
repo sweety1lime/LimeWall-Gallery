@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LiveWall</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <main class="container">
+      <header class="row header">
+        <h1>LiveWall</h1>
+        <div class="daemon">
+          <span id="daemon-state" class="state offline">offline</span>
+          <button id="connect" type="button">Connect</button>
+        </div>
+      </header>
+
+      <section class="panel">
+        <h2>Monitors</h2>
+        <div id="monitors" class="monitors">
+          <p class="hint">Connect to the renderer to list monitors.</p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Wallpaper</h2>
+        <div class="row">
+          <input id="file" type="text" placeholder="Path to a video, GIF or image" />
+          <button id="browse" type="button">Browse…</button>
+        </div>
+        <div class="row options">
+          <label>
+            Quality
+            <select id="quality">
+              <option value="eco">Eco</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="max">Max</option>
+            </select>
+          </label>
+          <label class="checkbox">
+            <input id="anime4k" type="checkbox" />
+            Anime4K
+          </label>
+          <label class="volume">
+            Volume
+            <input id="volume" type="range" min="0" max="100" value="0" />
+            <span id="volume-value">0</span>
+          </label>
+        </div>
+        <div class="row actions">
+          <button id="apply" type="button" class="primary">Apply</button>
+          <button id="pause" type="button">Pause</button>
+          <button id="resume" type="button">Resume</button>
+          <button id="stop" type="button">Stop</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Active sessions</h2>
+        <div id="sessions"><p class="hint">Nothing is playing.</p></div>
+      </section>
+
+      <p id="message" class="message"></p>
+    </main>
+  </body>
+</html>

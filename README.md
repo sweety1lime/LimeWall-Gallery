@@ -40,7 +40,11 @@ IPC (named pipe / unix socket):
 renderer serve
 renderer ctl play video.mp4 --monitor 0 --quality max
 renderer ctl pause | resume | volume 30 | quality eco | stop | status | shutdown
-``` Anime4K Mode B Fast also passes an end-to-end
+```
+
+Control UI (`apps/ui`, Tauri 2 + vanilla TS): finds or starts the daemon,
+lists monitors, applies wallpapers with quality/volume controls. Run with
+`cd apps/ui && npm install && npm run tauri dev`. Anime4K Mode B Fast also passes an end-to-end
 shader-loading smoke test on Windows 10 22H2.
 
 Phase 2 foundation has started with a standalone `crates/ipc`: versioned and

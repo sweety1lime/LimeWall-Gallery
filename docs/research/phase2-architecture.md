@@ -6,9 +6,12 @@ resume/volume/quality, verified live) are done. The named-pipe timeout
 limitation is addressed as planned: each connection runs on its own thread and
 forwards decoded requests over a channel to the daemon thread, so a stalled
 client blocks only its own connection thread (16 concurrent connections max).
-Next: the Tauri UI shell that finds or starts the daemon (rest of task 2.1),
-then the library (2.2). Phase 1 remains open only for unavailable hardware
-checks (physical second monitor and final 720p → 1440p/4K comparison).
+The Tauri UI shell (rest of task 2.1) is done: `apps/ui` finds the daemon or
+spawns it detached and drives it through tauri commands; verified by an
+end-to-end test that spawns the real renderer (a live window run is still
+pending a free desktop). Next: the library (2.2). Phase 1 remains open only
+for unavailable hardware checks (physical second monitor and final
+720p → 1440p/4K comparison).
 
 ## 1. Process ownership
 

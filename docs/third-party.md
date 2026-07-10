@@ -47,6 +47,16 @@
 | libloading | ISC | загрузка libmpv-2.dll в рантайме |
 | serde 1.0.228 / serde_json 1.0.150 | MIT OR Apache-2.0 | JSON-протокол IPC |
 | interprocess 2.4.2 | 0BSD OR Apache-2.0 | локальные сокеты: Windows named pipes / Unix sockets |
+| tauri 2 / tauri-build 2 | MIT OR Apache-2.0 | каркас UI (apps/ui) |
+| tauri-plugin-dialog 2 / tauri-plugin-opener 2 | MIT OR Apache-2.0 | нативный файловый диалог; открытие ссылок |
+
+## Frontend-зависимости UI (npm, apps/ui)
+
+| Пакет | Лицензия | Назначение |
+|---|---|---|
+| @tauri-apps/api, @tauri-apps/plugin-dialog, @tauri-apps/plugin-opener | MIT OR Apache-2.0 | invoke-мост и плагины |
+| vite | MIT | сборка фронтенда |
+| typescript | Apache-2.0 | типизация |
 
 Транзитивные зависимости нового IPC-стека проверены по Cargo manifests:
 0BSD / MIT / Apache-2.0 / Unlicense; `unicode-ident` дополнительно содержит
