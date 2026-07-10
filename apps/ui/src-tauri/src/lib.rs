@@ -94,6 +94,19 @@ fn acknowledged(command: ipc::Command) -> Result<String, String> {
     }
 }
 
+#[tauri::command]
+fn get_autostart() -> Result<bool, String> {
+    match daemon_client::request(&daemon_client::endpoint(), ipc::Command::GetAutostart)? {
+        ipc::ResponseData::Autostart { enabled } => Ok(enabled),
+        other => Err(format!("unexpected daemon response: {other:?}")),
+    }
+}
+
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<String, String> {
+    acknowledged(ipc::Command::SetAutostart { enabled })
+}
+
 // ---------------------------------------------------------------------------
 // library commands (import runs ffmpeg — keep it off the UI thread)
 // ---------------------------------------------------------------------------
@@ -143,6 +156,8 @@ pub fn run() {
             resume,
             set_volume,
             set_quality,
+            get_autostart,
+            set_autostart,
             library_list,
             library_import,
             library_remove,

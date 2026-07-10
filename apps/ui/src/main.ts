@@ -36,6 +36,7 @@ const el = <T extends HTMLElement>(id: string): T => {
 
 const daemonState = el<HTMLSpanElement>("daemon-state");
 const connectButton = el<HTMLButtonElement>("connect");
+const autostartCheckbox = el<HTMLInputElement>("autostart");
 const monitorsBox = el<HTMLDivElement>("monitors");
 const sessionsBox = el<HTMLDivElement>("sessions");
 const fileInput = el<HTMLInputElement>("file");
@@ -92,6 +93,12 @@ async function connect() {
     await refreshMonitors();
     await refreshSessions();
     await refreshLibrary();
+    try {
+      autostartCheckbox.checked = await invoke<boolean>("get_autostart");
+      autostartCheckbox.disabled = false;
+    } catch {
+      autostartCheckbox.disabled = true;
+    }
   } catch {
     setDisconnected();
   } finally {
@@ -340,6 +347,13 @@ window.addEventListener("DOMContentLoaded", () => {
   el<HTMLButtonElement>("pause").addEventListener("click", () => void simple("pause"));
   el<HTMLButtonElement>("resume").addEventListener("click", () => void simple("resume"));
   el<HTMLButtonElement>("stop").addEventListener("click", () => void simple("stop"));
+  autostartCheckbox.addEventListener("change", () => {
+    void call<string>("set_autostart", { enabled: autostartCheckbox.checked })
+      .then((status) => report(status))
+      .catch(() => {
+        autostartCheckbox.checked = !autostartCheckbox.checked;
+      });
+  });
   volumeRange.addEventListener("input", () => {
     volumeValue.textContent = volumeRange.value;
   });

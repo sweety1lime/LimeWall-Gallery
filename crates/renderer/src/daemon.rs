@@ -23,6 +23,9 @@ const MAX_CONNECTIONS: usize = 16;
 
 const STATE_VERSION: u32 = 1;
 
+/// Name of the Run-key value used for autostart.
+const AUTOSTART_APP: &str = "LiveWall";
+
 pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<()> {
     let endpoint = endpoint
         .map(str::to_owned)
@@ -35,11 +38,24 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
         .with_context(|| format!("failed to bind renderer endpoint {endpoint:?}"))?;
     println!("renderer daemon listening at {endpoint}");
 
-    let (request_tx, request_rx) = mpsc::channel::<Envelope>();
+    let (message_tx, message_rx) = mpsc::channel::<Message>();
+    let request_tx = message_tx.clone();
     std::thread::Builder::new()
         .name("ipc-accept".into())
         .spawn(move || accept_loop(&server, &request_tx))
         .context("failed to spawn IPC accept thread")?;
+
+    // The tray belongs to the daemon so it works while the UI is closed.
+    // Headless operation (e.g. CI) is fine — just log and continue.
+    let _tray = match platform::tray::spawn("LiveWall", move |event| {
+        let _ = message_tx.send(Message::Tray(event));
+    }) {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            eprintln!("tray disabled: {error}");
+            None
+        }
+    };
 
     let mut state = DaemonState {
         host,
@@ -51,13 +67,22 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
     // clients connecting meanwhile just queue in the request channel.
     state.restore_state();
     // Ends when every sender is gone (accept loop died) or on shutdown.
-    for envelope in request_rx {
-        let shutdown = matches!(envelope.request.command, ipc::Command::Shutdown);
-        let response = state.handle(envelope.request);
-        let ok = matches!(response.body, ipc::ResponseBody::Success { .. });
-        let _ = envelope.reply.send(response);
-        if shutdown && ok {
-            break;
+    for message in message_rx {
+        match message {
+            Message::Request(envelope) => {
+                let shutdown = matches!(envelope.request.command, ipc::Command::Shutdown);
+                let response = state.handle(envelope.request);
+                let ok = matches!(response.body, ipc::ResponseBody::Success { .. });
+                let _ = envelope.reply.send(response);
+                if shutdown && ok {
+                    break;
+                }
+            }
+            Message::Tray(event) => {
+                if state.handle_tray(event) {
+                    break;
+                }
+            }
         }
     }
     // Shutdown intentionally leaves the state file alone: these wallpapers
@@ -65,6 +90,12 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
     state.stop_all();
     println!("renderer daemon stopped");
     Ok(())
+}
+
+/// Everything the daemon thread reacts to.
+enum Message {
+    Request(Envelope),
+    Tray(platform::tray::TrayEvent),
 }
 
 /// %APPDATA%/LiveWall/wallpapers.json (shared convention with the UI library
@@ -79,7 +110,7 @@ struct Envelope {
     reply: mpsc::Sender<ipc::Response>,
 }
 
-fn accept_loop(server: &ipc::LocalServer, requests: &mpsc::Sender<Envelope>) {
+fn accept_loop(server: &ipc::LocalServer, requests: &mpsc::Sender<Message>) {
     let active = Arc::new(AtomicUsize::new(0));
     let mut consecutive_errors = 0u32;
     loop {
@@ -126,7 +157,7 @@ fn accept_loop(server: &ipc::LocalServer, requests: &mpsc::Sender<Envelope>) {
 }
 
 /// Reads one request, routes it to the daemon thread and writes the response.
-fn handle_connection(mut stream: ipc::LocalStream, requests: &mpsc::Sender<Envelope>) {
+fn handle_connection(mut stream: ipc::LocalStream, requests: &mpsc::Sender<Message>) {
     let request: ipc::Request = match ipc::read_frame(&mut stream) {
         Ok(request) => request,
         Err(error) => {
@@ -142,10 +173,10 @@ fn handle_connection(mut stream: ipc::LocalStream, requests: &mpsc::Sender<Envel
     };
     let id = request.id;
     let (reply_tx, reply_rx) = mpsc::channel();
-    let envelope = Envelope {
+    let envelope = Message::Request(Envelope {
         request,
         reply: reply_tx,
-    };
+    });
     let response = if requests.send(envelope).is_ok() {
         reply_rx.recv().unwrap_or_else(|_| {
             ipc::Response::error(id, ipc::ErrorCode::Internal, "daemon dropped the request")
@@ -250,6 +281,10 @@ impl DaemonState {
                 quality,
                 anime4k,
             } => self.set_quality(monitor, quality, anime4k),
+            ipc::Command::GetAutostart => platform::autostart_enabled(AUTOSTART_APP)
+                .map(|enabled| ipc::ResponseData::Autostart { enabled })
+                .map_err(internal),
+            ipc::Command::SetAutostart { enabled } => self.set_autostart(enabled),
             ipc::Command::Shutdown => Ok(ipc::ResponseData::Acknowledged {
                 status: "shutting_down".into(),
             }),
@@ -261,6 +296,57 @@ impl DaemonState {
             Ok(data) => ipc::Response::success(id, data),
             Err((code, message)) => ipc::Response::error(id, code, message),
         }
+    }
+
+    /// Registers or removes the daemon in the per-user Run key.
+    fn set_autostart(&self, enabled: bool) -> CmdResult {
+        let command = if enabled {
+            let exe = std::env::current_exe()
+                .map_err(|error| internal(format!("cannot resolve own path: {error}")))?;
+            Some(format!("\"{}\" serve", exe.display()))
+        } else {
+            None
+        };
+        platform::set_autostart(AUTOSTART_APP, command.as_deref()).map_err(internal)?;
+        Ok(ipc::ResponseData::Acknowledged {
+            status: if enabled {
+                "autostart enabled"
+            } else {
+                "autostart disabled"
+            }
+            .into(),
+        })
+    }
+
+    /// Returns `true` when the daemon should exit (tray Quit).
+    fn handle_tray(&mut self, event: platform::tray::TrayEvent) -> bool {
+        use platform::tray::TrayEvent;
+        match event {
+            TrayEvent::PauseAll => {
+                if let Err((_, message)) = self.set_paused(None, true) {
+                    eprintln!("tray pause failed: {message}");
+                } else {
+                    self.save_state();
+                }
+            }
+            TrayEvent::ResumeAll => {
+                if let Err((_, message)) = self.set_paused(None, false) {
+                    eprintln!("tray resume failed: {message}");
+                } else {
+                    self.save_state();
+                }
+            }
+            TrayEvent::OpenUi => {
+                if let Err(error) = spawn_ui() {
+                    eprintln!("failed to open the UI: {error}");
+                }
+            }
+            TrayEvent::Quit => {
+                println!("quit requested from the tray");
+                return true;
+            }
+        }
+        false
     }
 
     /// Writes the wallpaper set to disk (atomically) so it survives restarts.
@@ -586,6 +672,38 @@ fn no_session(monitor: ipc::MonitorId) -> (ipc::ErrorCode, String) {
         ipc::ErrorCode::PlaybackFailed,
         format!("no active session on monitor {monitor}"),
     )
+}
+
+/// Starts the control UI detached: explicit override, next to the renderer
+/// executable (bundled install), then the development build location.
+fn spawn_ui() -> Result<(), String> {
+    let exe_name = if cfg!(windows) { "ui.exe" } else { "ui" };
+    let mut candidates = Vec::new();
+    if let Ok(explicit) = std::env::var("LIVEWALL_UI") {
+        candidates.push(PathBuf::from(explicit));
+    }
+    if let Ok(renderer) = std::env::current_exe()
+        && let Some(dir) = renderer.parent()
+    {
+        candidates.push(dir.join(exe_name));
+        candidates.push(dir.join("LiveWall.exe"));
+        // Development layout: target/debug next to the UI workspace build.
+        candidates.push(
+            dir.join("../../apps/ui/src-tauri/target/debug")
+                .join(exe_name),
+        );
+    }
+    let ui = candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or("UI executable not found (set LIVEWALL_UI)")?;
+    std::process::Command::new(&ui)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(drop)
+        .map_err(|error| format!("failed to start {}: {error}", ui.display()))
 }
 
 /// Monitor for a persisted entry: device name first (indices shuffle when

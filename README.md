@@ -43,8 +43,13 @@ renderer ctl pause | resume | volume 30 | quality eco | stop | status | shutdown
 ```
 
 Control UI (`apps/ui`, Tauri 2 + vanilla TS): finds or starts the daemon,
-lists monitors, applies wallpapers with quality/volume controls. Run with
-`cd apps/ui && npm install && npm run tauri dev`. Anime4K Mode B Fast also passes an end-to-end
+lists monitors, keeps a media library (drag-and-drop import, GIF converted to
+mp4), applies wallpapers with quality/volume controls. Run with
+`cd apps/ui && npm install && npm run tauri dev`.
+
+The daemon owns a tray icon (pause all / resume all / open UI / quit),
+persists applied wallpapers and restores them on start; autostart with
+Windows is a checkbox in the UI (or `renderer ctl autostart on|off`). Anime4K Mode B Fast also passes an end-to-end
 shader-loading smoke test on Windows 10 22H2.
 
 Phase 2 foundation has started with a standalone `crates/ipc`: versioned and

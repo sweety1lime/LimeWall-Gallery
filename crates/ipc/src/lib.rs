@@ -77,6 +77,11 @@ pub enum Command {
         quality: Quality,
         anime4k: bool,
     },
+    /// Whether the daemon starts with the user session.
+    GetAutostart,
+    SetAutostart {
+        enabled: bool,
+    },
     Shutdown,
 }
 
@@ -159,6 +164,7 @@ pub enum ResponseData {
     Pong { daemon_version: String },
     Monitors { monitors: Vec<Monitor> },
     Status { sessions: Vec<SessionStatus> },
+    Autostart { enabled: bool },
     Acknowledged { status: String },
 }
 

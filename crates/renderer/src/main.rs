@@ -122,6 +122,18 @@ enum DaemonCommand {
         #[arg(long)]
         anime4k: bool,
     },
+    /// Manage starting the daemon with the user session.
+    Autostart {
+        #[arg(value_enum)]
+        action: AutostartAction,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum AutostartAction {
+    Status,
+    On,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +215,11 @@ fn ctl(endpoint: Option<&str>, command: DaemonCommand) -> anyhow::Result<()> {
             quality: quality.into(),
             anime4k,
         },
+        DaemonCommand::Autostart { action } => match action {
+            AutostartAction::Status => ipc::Command::GetAutostart,
+            AutostartAction::On => ipc::Command::SetAutostart { enabled: true },
+            AutostartAction::Off => ipc::Command::SetAutostart { enabled: false },
+        },
     };
     let response = ipc::send_request(&endpoint, &ipc::Request::new(1, command))
         .with_context(|| format!("failed to contact renderer at {endpoint:?}"))?;
@@ -261,6 +278,12 @@ fn print_daemon_result(result: ipc::ResponseData) -> anyhow::Result<()> {
                     session.volume
                 );
             }
+        }
+        ipc::ResponseData::Autostart { enabled } => {
+            println!(
+                "autostart: {}",
+                if enabled { "enabled" } else { "disabled" }
+            );
         }
         ipc::ResponseData::Acknowledged { status } => {
             println!("{status}");

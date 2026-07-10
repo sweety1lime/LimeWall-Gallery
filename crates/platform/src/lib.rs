@@ -96,7 +96,13 @@ pub trait WallpaperHost {
 }
 
 #[cfg(windows)]
+mod autostart_win32;
+#[cfg(windows)]
+mod tray_win32;
+#[cfg(windows)]
 mod win32;
+
+pub mod tray;
 
 /// Creates the backend for the current platform.
 pub fn create_host() -> Result<Box<dyn WallpaperHost>> {
@@ -109,5 +115,32 @@ pub fn create_host() -> Result<Box<dyn WallpaperHost>> {
         Err(HostError::Unsupported(
             "only Windows is targeted in phase 0",
         ))
+    }
+}
+
+/// Whether `app` is registered to start with the user session.
+pub fn autostart_enabled(app: &str) -> Result<bool> {
+    #[cfg(windows)]
+    {
+        autostart_win32::enabled(app)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err(HostError::Unsupported("autostart"))
+    }
+}
+
+/// Registers `command` to run at logon under the name `app`, or removes the
+/// registration when `command` is `None`.
+pub fn set_autostart(app: &str, command: Option<&str>) -> Result<()> {
+    #[cfg(windows)]
+    {
+        autostart_win32::set(app, command)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, command);
+        Err(HostError::Unsupported("autostart"))
     }
 }
