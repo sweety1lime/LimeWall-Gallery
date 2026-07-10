@@ -49,6 +49,10 @@ enum Command {
         /// Override the per-user local socket name (primarily for tests).
         #[arg(long)]
         endpoint: Option<String>,
+        /// Override the wallpaper state file (primarily for tests);
+        /// defaults to the per-user data directory.
+        #[arg(long)]
+        state: Option<PathBuf>,
     },
     /// Send one control request to a running renderer daemon.
     Ctl {
@@ -153,7 +157,7 @@ fn main() -> anyhow::Result<()> {
             volume,
             anime4k,
         } => play(&file, monitor, quality, volume, anime4k),
-        Command::Serve { endpoint } => daemon::run(endpoint.as_deref()),
+        Command::Serve { endpoint, state } => daemon::run(endpoint.as_deref(), state.as_deref()),
         Command::Ctl { endpoint, command } => ctl(endpoint.as_deref(), command),
     }
 }

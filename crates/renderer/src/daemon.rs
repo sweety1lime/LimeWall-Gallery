@@ -9,21 +9,27 @@
 //! I/O timeouts.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 
 use crate::playback;
 
 /// Upper bound on connection threads; above it clients get a busy error.
 const MAX_CONNECTIONS: usize = 16;
 
-pub fn run(endpoint: Option<&str>) -> anyhow::Result<()> {
+const STATE_VERSION: u32 = 1;
+
+pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<()> {
     let endpoint = endpoint
         .map(str::to_owned)
         .unwrap_or_else(ipc::default_endpoint);
+    let state_path = state_path
+        .map(Path::to_path_buf)
+        .or_else(default_state_path);
     let host = platform::create_host().context("failed to initialize wallpaper host")?;
     let server = ipc::LocalServer::bind(&endpoint)
         .with_context(|| format!("failed to bind renderer endpoint {endpoint:?}"))?;
@@ -39,7 +45,11 @@ pub fn run(endpoint: Option<&str>) -> anyhow::Result<()> {
         host,
         api: None,
         sessions: HashMap::new(),
+        state_path,
     };
+    // Wallpapers applied before the last shutdown come back on their own;
+    // clients connecting meanwhile just queue in the request channel.
+    state.restore_state();
     // Ends when every sender is gone (accept loop died) or on shutdown.
     for envelope in request_rx {
         let shutdown = matches!(envelope.request.command, ipc::Command::Shutdown);
@@ -50,9 +60,17 @@ pub fn run(endpoint: Option<&str>) -> anyhow::Result<()> {
             break;
         }
     }
+    // Shutdown intentionally leaves the state file alone: these wallpapers
+    // are meant to come back on the next start.
     state.stop_all();
     println!("renderer daemon stopped");
     Ok(())
+}
+
+/// %APPDATA%/LiveWall/wallpapers.json (shared convention with the UI library
+/// living next to it).
+fn default_state_path() -> Option<PathBuf> {
+    Some(dirs::data_dir()?.join("LiveWall").join("wallpapers.json"))
 }
 
 /// One decoded request plus the channel its response must go back through.
@@ -166,6 +184,27 @@ struct DaemonState {
     /// Loaded lazily on the first play request.
     api: Option<Arc<mpv::Api>>,
     sessions: HashMap<ipc::MonitorId, Session>,
+    /// Where applied wallpapers persist across daemon restarts.
+    state_path: Option<PathBuf>,
+}
+
+/// One entry of the persisted wallpaper state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedSession {
+    monitor: ipc::MonitorId,
+    /// Device name; preferred over the index when the topology changed.
+    monitor_name: String,
+    path: PathBuf,
+    quality: ipc::Quality,
+    volume: u8,
+    anime4k: bool,
+    paused: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedState {
+    version: u32,
+    wallpapers: Vec<PersistedSession>,
 }
 
 impl DaemonState {
@@ -180,6 +219,15 @@ impl DaemonState {
         }
 
         let id = request.id;
+        let mutates_wallpapers = matches!(
+            request.command,
+            ipc::Command::Play { .. }
+                | ipc::Command::Stop { .. }
+                | ipc::Command::Pause { .. }
+                | ipc::Command::Resume { .. }
+                | ipc::Command::SetVolume { .. }
+                | ipc::Command::SetQuality { .. }
+        );
         let result = match request.command {
             ipc::Command::Ping => Ok(ipc::ResponseData::Pong {
                 daemon_version: env!("CARGO_PKG_VERSION").into(),
@@ -206,9 +254,107 @@ impl DaemonState {
                 status: "shutting_down".into(),
             }),
         };
+        if mutates_wallpapers && result.is_ok() {
+            self.save_state();
+        }
         match result {
             Ok(data) => ipc::Response::success(id, data),
             Err((code, message)) => ipc::Response::error(id, code, message),
+        }
+    }
+
+    /// Writes the wallpaper set to disk (atomically) so it survives restarts.
+    fn save_state(&self) {
+        let Some(path) = &self.state_path else { return };
+        let mut wallpapers: Vec<PersistedSession> = self
+            .sessions
+            .values()
+            .map(|session| PersistedSession {
+                monitor: session.monitor.id,
+                monitor_name: session.monitor.name.clone(),
+                path: session.path.clone(),
+                quality: session.quality,
+                volume: session.volume,
+                anime4k: session.anime4k,
+                paused: session.paused,
+            })
+            .collect();
+        wallpapers.sort_by_key(|wallpaper| wallpaper.monitor);
+        let state = PersistedState {
+            version: STATE_VERSION,
+            wallpapers,
+        };
+        if let Err(error) = write_state(path, &state) {
+            eprintln!("failed to save state to {}: {error}", path.display());
+        }
+    }
+
+    /// Brings back wallpapers persisted by a previous daemon run. Entries for
+    /// missing monitors or media are skipped but stay in the file, so they
+    /// return when the monitor or drive does.
+    fn restore_state(&mut self) {
+        let Some(path) = self.state_path.clone() else {
+            return;
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                eprintln!("failed to read state file {}: {error}", path.display());
+                return;
+            }
+        };
+        let persisted: PersistedState = match serde_json::from_slice(&bytes) {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                eprintln!("state file {} is corrupted: {error}", path.display());
+                return;
+            }
+        };
+        if persisted.version != STATE_VERSION {
+            eprintln!(
+                "state file {} has version {}, expected {STATE_VERSION}; skipping restore",
+                path.display(),
+                persisted.version
+            );
+            return;
+        }
+        let monitors = match self.host.enumerate_monitors() {
+            Ok(monitors) => monitors,
+            Err(error) => {
+                eprintln!("restore skipped: cannot enumerate monitors: {error}");
+                return;
+            }
+        };
+        for entry in persisted.wallpapers {
+            let Some(monitor) = resolve_restore_monitor(&entry, &monitors) else {
+                eprintln!(
+                    "restore skipped: monitor {} ({}) is not present",
+                    entry.monitor, entry.monitor_name
+                );
+                continue;
+            };
+            if !entry.path.is_file() {
+                eprintln!("restore skipped: media missing: {}", entry.path.display());
+                continue;
+            }
+            match self.play(
+                monitor,
+                entry.path.clone(),
+                entry.quality,
+                entry.volume,
+                entry.anime4k,
+            ) {
+                Ok(_) => {
+                    if entry.paused {
+                        let _ = self.set_paused(Some(monitor), true);
+                    }
+                    println!("restored wallpaper on monitor {monitor}");
+                }
+                Err((_, message)) => {
+                    eprintln!("restore failed on monitor {monitor}: {message}");
+                }
+            }
         }
     }
 
@@ -442,6 +588,30 @@ fn no_session(monitor: ipc::MonitorId) -> (ipc::ErrorCode, String) {
     )
 }
 
+/// Monitor for a persisted entry: device name first (indices shuffle when
+/// the display topology changes), then the stored index.
+fn resolve_restore_monitor(
+    entry: &PersistedSession,
+    monitors: &[platform::MonitorInfo],
+) -> Option<ipc::MonitorId> {
+    monitors
+        .iter()
+        .find(|monitor| monitor.name == entry.monitor_name)
+        .or_else(|| monitors.iter().find(|monitor| monitor.id == entry.monitor))
+        .map(|monitor| monitor.id)
+}
+
+fn write_state(path: &Path, state: &PersistedState) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let json = serde_json::to_vec_pretty(state).map_err(|error| error.to_string())?;
+    // Write-then-rename keeps the previous state intact if we crash mid-write.
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, json).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, path).map_err(|error| error.to_string())
+}
+
 fn internal(error: impl std::fmt::Display) -> (ipc::ErrorCode, String) {
     (ipc::ErrorCode::Internal, error.to_string())
 }
@@ -462,5 +632,72 @@ pub fn monitor_to_ipc(monitor: platform::MonitorInfo) -> ipc::Monitor {
         },
         scale: monitor.scale,
         is_primary: monitor.is_primary,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn monitor(id: usize, name: &str) -> platform::MonitorInfo {
+        platform::MonitorInfo {
+            id,
+            name: name.into(),
+            bounds: platform::Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            scale: 1.0,
+            is_primary: id == 0,
+        }
+    }
+
+    fn entry(monitor: usize, monitor_name: &str) -> PersistedSession {
+        PersistedSession {
+            monitor,
+            monitor_name: monitor_name.into(),
+            path: PathBuf::from("wall.mp4"),
+            quality: ipc::Quality::Balanced,
+            volume: 0,
+            anime4k: false,
+            paused: false,
+        }
+    }
+
+    #[test]
+    fn restore_prefers_monitor_name_over_index() {
+        // The monitor moved from index 1 to 0 (e.g. another display removed).
+        let monitors = [monitor(0, r"\\.\DISPLAY2")];
+        let resolved = resolve_restore_monitor(&entry(1, r"\\.\DISPLAY2"), &monitors);
+        assert_eq!(resolved, Some(0));
+    }
+
+    #[test]
+    fn restore_falls_back_to_index_when_name_changed() {
+        let monitors = [monitor(0, r"\\.\DISPLAY1"), monitor(1, r"\\.\DISPLAY9")];
+        let resolved = resolve_restore_monitor(&entry(1, r"\\.\DISPLAY2"), &monitors);
+        assert_eq!(resolved, Some(1));
+    }
+
+    #[test]
+    fn restore_skips_missing_monitors() {
+        let monitors = [monitor(0, r"\\.\DISPLAY1")];
+        let resolved = resolve_restore_monitor(&entry(3, r"\\.\DISPLAY4"), &monitors);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn persisted_state_round_trips_through_json() {
+        let state = PersistedState {
+            version: STATE_VERSION,
+            wallpapers: vec![entry(0, r"\\.\DISPLAY1")],
+        };
+        let json = serde_json::to_vec(&state).expect("serialize");
+        let back: PersistedState = serde_json::from_slice(&json).expect("deserialize");
+        assert_eq!(back.version, STATE_VERSION);
+        assert_eq!(back.wallpapers.len(), 1);
+        assert_eq!(back.wallpapers[0].monitor_name, r"\\.\DISPLAY1");
     }
 }
