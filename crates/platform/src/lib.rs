@@ -100,9 +100,12 @@ mod autostart_win32;
 #[cfg(windows)]
 mod tray_win32;
 #[cfg(windows)]
+mod watcher_win32;
+#[cfg(windows)]
 mod win32;
 
 pub mod tray;
+pub mod watcher;
 
 /// Creates the backend for the current platform.
 pub fn create_host() -> Result<Box<dyn WallpaperHost>> {

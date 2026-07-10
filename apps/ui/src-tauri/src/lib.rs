@@ -107,6 +107,34 @@ fn set_autostart(enabled: bool) -> Result<String, String> {
     acknowledged(ipc::Command::SetAutostart { enabled })
 }
 
+fn parse_battery_policy(policy: &str) -> Result<ipc::BatteryPolicy, String> {
+    match policy {
+        "pause" => Ok(ipc::BatteryPolicy::Pause),
+        "eco" => Ok(ipc::BatteryPolicy::Eco),
+        "keep" => Ok(ipc::BatteryPolicy::Keep),
+        other => Err(format!("unknown battery policy: {other}")),
+    }
+}
+
+#[tauri::command]
+fn get_battery_policy() -> Result<String, String> {
+    match daemon_client::request(&daemon_client::endpoint(), ipc::Command::GetBatteryPolicy)? {
+        ipc::ResponseData::BatteryPolicy { policy } => Ok(match policy {
+            ipc::BatteryPolicy::Pause => "pause".into(),
+            ipc::BatteryPolicy::Eco => "eco".into(),
+            ipc::BatteryPolicy::Keep => "keep".into(),
+        }),
+        other => Err(format!("unexpected daemon response: {other:?}")),
+    }
+}
+
+#[tauri::command]
+fn set_battery_policy(policy: String) -> Result<String, String> {
+    acknowledged(ipc::Command::SetBatteryPolicy {
+        policy: parse_battery_policy(&policy)?,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // library commands (import runs ffmpeg — keep it off the UI thread)
 // ---------------------------------------------------------------------------
@@ -158,6 +186,8 @@ pub fn run() {
             set_quality,
             get_autostart,
             set_autostart,
+            get_battery_policy,
+            set_battery_policy,
             library_list,
             library_import,
             library_remove,

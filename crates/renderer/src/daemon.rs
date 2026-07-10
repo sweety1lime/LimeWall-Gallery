@@ -47,6 +47,7 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
 
     // The tray belongs to the daemon so it works while the UI is closed.
     // Headless operation (e.g. CI) is fine — just log and continue.
+    let message_tx_watcher = message_tx.clone();
     let _tray = match platform::tray::spawn("LiveWall", move |event| {
         let _ = message_tx.send(Message::Tray(event));
     }) {
@@ -57,11 +58,27 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
         }
     };
 
+    // Politeness: pause on fullscreen apps, lock, dark display, battery.
+    let watcher_tx = message_tx_watcher;
+    let _watcher = match platform::watcher::spawn(move |event| {
+        let _ = watcher_tx.send(Message::Activity(event));
+    }) {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            eprintln!("activity watcher disabled: {error}");
+            None
+        }
+    };
+
     let mut state = DaemonState {
         host,
         api: None,
         sessions: HashMap::new(),
         state_path,
+        fullscreen_monitors: Vec::new(),
+        politeness: Politeness::default(),
+        battery_policy: ipc::BatteryPolicy::Pause,
+        battery_eco_active: false,
     };
     // Wallpapers applied before the last shutdown come back on their own;
     // clients connecting meanwhile just queue in the request channel.
@@ -83,6 +100,7 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
                     break;
                 }
             }
+            Message::Activity(event) => state.handle_activity(event),
         }
     }
     // Shutdown intentionally leaves the state file alone: these wallpapers
@@ -96,6 +114,7 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
 enum Message {
     Request(Envelope),
     Tray(platform::tray::TrayEvent),
+    Activity(platform::watcher::ActivityEvent),
 }
 
 /// %APPDATA%/LiveWall/wallpapers.json (shared convention with the UI library
@@ -203,11 +222,22 @@ struct Session {
     quality: ipc::Quality,
     volume: u8,
     anime4k: bool,
-    paused: bool,
+    /// Pause requested by the user; persisted.
+    user_paused: bool,
+    /// Pause currently applied to the player (user intent or politeness).
+    effective_paused: bool,
     /// Source size probed at load, for shader decisions on quality switches.
     width: i64,
     height: i64,
     monitor: platform::MonitorInfo,
+}
+
+/// System conditions that pause playback regardless of user intent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Politeness {
+    session_locked: bool,
+    display_off: bool,
+    on_battery: bool,
 }
 
 struct DaemonState {
@@ -217,6 +247,12 @@ struct DaemonState {
     sessions: HashMap<ipc::MonitorId, Session>,
     /// Where applied wallpapers persist across daemon restarts.
     state_path: Option<PathBuf>,
+    /// Monitor device names covered by a fullscreen foreground window.
+    fullscreen_monitors: Vec<String>,
+    politeness: Politeness,
+    battery_policy: ipc::BatteryPolicy,
+    /// Sessions currently downgraded to Eco because of the battery policy.
+    battery_eco_active: bool,
 }
 
 /// One entry of the persisted wallpaper state.
@@ -235,7 +271,14 @@ struct PersistedSession {
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedState {
     version: u32,
+    /// Battery policy; absent in files from older builds.
+    #[serde(default = "default_battery_policy")]
+    on_battery: ipc::BatteryPolicy,
     wallpapers: Vec<PersistedSession>,
+}
+
+fn default_battery_policy() -> ipc::BatteryPolicy {
+    ipc::BatteryPolicy::Pause
 }
 
 impl DaemonState {
@@ -258,6 +301,7 @@ impl DaemonState {
                 | ipc::Command::Resume { .. }
                 | ipc::Command::SetVolume { .. }
                 | ipc::Command::SetQuality { .. }
+                | ipc::Command::SetBatteryPolicy { .. }
         );
         let result = match request.command {
             ipc::Command::Ping => Ok(ipc::ResponseData::Pong {
@@ -285,6 +329,16 @@ impl DaemonState {
                 .map(|enabled| ipc::ResponseData::Autostart { enabled })
                 .map_err(internal),
             ipc::Command::SetAutostart { enabled } => self.set_autostart(enabled),
+            ipc::Command::GetBatteryPolicy => Ok(ipc::ResponseData::BatteryPolicy {
+                policy: self.battery_policy,
+            }),
+            ipc::Command::SetBatteryPolicy { policy } => {
+                self.battery_policy = policy;
+                self.apply_politeness();
+                Ok(ipc::ResponseData::Acknowledged {
+                    status: format!("battery policy: {policy:?}").to_lowercase(),
+                })
+            }
             ipc::Command::Shutdown => Ok(ipc::ResponseData::Acknowledged {
                 status: "shutting_down".into(),
             }),
@@ -316,6 +370,98 @@ impl DaemonState {
             }
             .into(),
         })
+    }
+
+    /// Applies a system activity change to every session.
+    fn handle_activity(&mut self, event: platform::watcher::ActivityEvent) {
+        use platform::watcher::ActivityEvent;
+        match event {
+            ActivityEvent::Fullscreen(monitors) => {
+                if !monitors.is_empty() {
+                    println!("fullscreen app detected on {}", monitors.join(", "));
+                } else if !self.fullscreen_monitors.is_empty() {
+                    println!("fullscreen app gone");
+                }
+                self.fullscreen_monitors = monitors;
+            }
+            ActivityEvent::Battery(on_battery) => {
+                println!(
+                    "power source: {}",
+                    if on_battery { "battery" } else { "AC" }
+                );
+                self.politeness.on_battery = on_battery;
+            }
+            ActivityEvent::SessionLocked(locked) => {
+                println!("session {}", if locked { "locked" } else { "unlocked" });
+                self.politeness.session_locked = locked;
+            }
+            ActivityEvent::DisplayOff(off) => {
+                println!("display {}", if off { "off" } else { "on" });
+                self.politeness.display_off = off;
+            }
+        }
+        self.apply_politeness();
+    }
+
+    /// Reconciles every player's pause/quality with user intent and the
+    /// current system conditions.
+    fn apply_politeness(&mut self) {
+        let battery_pause =
+            self.politeness.on_battery && self.battery_policy == ipc::BatteryPolicy::Pause;
+        let global_pause =
+            self.politeness.session_locked || self.politeness.display_off || battery_pause;
+        for session in self.sessions.values_mut() {
+            let fullscreen = self.fullscreen_monitors.contains(&session.monitor.name);
+            let desired = session.user_paused || global_pause || fullscreen;
+            if desired != session.effective_paused {
+                match session.player.set_property_bool("pause", desired) {
+                    Ok(()) => {
+                        session.effective_paused = desired;
+                        println!(
+                            "monitor {}: {} ({})",
+                            session.monitor.id,
+                            if desired { "paused" } else { "resumed" },
+                            pause_reason(session.user_paused, global_pause, fullscreen)
+                        );
+                    }
+                    Err(error) => eprintln!(
+                        "failed to toggle pause on monitor {}: {error}",
+                        session.monitor.id
+                    ),
+                }
+            }
+        }
+
+        // Battery Eco: a temporary downgrade, session.quality keeps the
+        // user's choice for persistence and for the way back.
+        let want_eco = self.politeness.on_battery && self.battery_policy == ipc::BatteryPolicy::Eco;
+        if want_eco != self.battery_eco_active {
+            for session in self.sessions.values() {
+                let (quality, anime4k) = if want_eco {
+                    (playback::Quality::Eco, false)
+                } else {
+                    (session.quality.into(), session.anime4k)
+                };
+                if let Err(error) = playback::set_quality(
+                    &session.player,
+                    quality,
+                    anime4k,
+                    session.width,
+                    session.height,
+                    &session.monitor,
+                ) {
+                    eprintln!(
+                        "failed to switch quality on monitor {}: {error}",
+                        session.monitor.id
+                    );
+                }
+            }
+            println!(
+                "battery eco {}",
+                if want_eco { "engaged" } else { "released" }
+            );
+            self.battery_eco_active = want_eco;
+        }
     }
 
     /// Returns `true` when the daemon should exit (tray Quit).
@@ -362,12 +508,13 @@ impl DaemonState {
                 quality: session.quality,
                 volume: session.volume,
                 anime4k: session.anime4k,
-                paused: session.paused,
+                paused: session.user_paused,
             })
             .collect();
         wallpapers.sort_by_key(|wallpaper| wallpaper.monitor);
         let state = PersistedState {
             version: STATE_VERSION,
+            on_battery: self.battery_policy,
             wallpapers,
         };
         if let Err(error) = write_state(path, &state) {
@@ -405,6 +552,7 @@ impl DaemonState {
             );
             return;
         }
+        self.battery_policy = persisted.on_battery;
         let monitors = match self.host.enumerate_monitors() {
             Ok(monitors) => monitors,
             Err(error) => {
@@ -457,7 +605,8 @@ impl DaemonState {
             .values()
             .map(|session| ipc::SessionStatus {
                 monitor: session.monitor.id,
-                state: if session.paused {
+                // Effective state: politeness pauses show up here too.
+                state: if session.effective_paused {
                     ipc::PlaybackState::Paused
                 } else {
                     ipc::PlaybackState::Playing
@@ -548,12 +697,18 @@ impl DaemonState {
                 quality,
                 volume,
                 anime4k,
-                paused: false,
+                user_paused: false,
+                effective_paused: false,
                 width: started.width,
                 height: started.height,
                 monitor: info,
             },
         );
+        // A wallpaper applied while e.g. a fullscreen game runs (or on
+        // battery with the Eco policy) must obey the rules immediately;
+        // clearing the flag makes the eco branch re-apply to the newcomer.
+        self.battery_eco_active = false;
+        self.apply_politeness();
         Ok(ipc::ResponseData::Acknowledged { status })
     }
 
@@ -599,13 +754,13 @@ impl DaemonState {
         }
         for monitor in &targets {
             if let Some(session) = self.sessions.get_mut(monitor) {
-                session
-                    .player
-                    .set_property_bool("pause", paused)
-                    .map_err(playback_err)?;
-                session.paused = paused;
+                session.user_paused = paused;
             }
         }
+        // The player state follows through the same reconciliation as the
+        // politeness rules, so a resume during e.g. a fullscreen game stays
+        // paused until the game ends.
+        self.apply_politeness();
         Ok(ipc::ResponseData::Acknowledged {
             status: if paused { "paused" } else { "resumed" }.into(),
         })
@@ -674,6 +829,18 @@ fn no_session(monitor: ipc::MonitorId) -> (ipc::ErrorCode, String) {
     )
 }
 
+fn pause_reason(user: bool, global: bool, fullscreen: bool) -> &'static str {
+    if user {
+        "user"
+    } else if fullscreen {
+        "fullscreen app"
+    } else if global {
+        "system state"
+    } else {
+        "conditions cleared"
+    }
+}
+
 /// Starts the control UI detached: explicit override, next to the renderer
 /// executable (bundled install), then the development build location.
 fn spawn_ui() -> Result<(), String> {
@@ -732,10 +899,6 @@ fn write_state(path: &Path, state: &PersistedState) -> Result<(), String> {
 
 fn internal(error: impl std::fmt::Display) -> (ipc::ErrorCode, String) {
     (ipc::ErrorCode::Internal, error.to_string())
-}
-
-fn playback_err(error: impl std::fmt::Display) -> (ipc::ErrorCode, String) {
-    (ipc::ErrorCode::PlaybackFailed, error.to_string())
 }
 
 pub fn monitor_to_ipc(monitor: platform::MonitorInfo) -> ipc::Monitor {
@@ -810,12 +973,21 @@ mod tests {
     fn persisted_state_round_trips_through_json() {
         let state = PersistedState {
             version: STATE_VERSION,
+            on_battery: ipc::BatteryPolicy::Eco,
             wallpapers: vec![entry(0, r"\\.\DISPLAY1")],
         };
         let json = serde_json::to_vec(&state).expect("serialize");
         let back: PersistedState = serde_json::from_slice(&json).expect("deserialize");
         assert_eq!(back.version, STATE_VERSION);
+        assert_eq!(back.on_battery, ipc::BatteryPolicy::Eco);
         assert_eq!(back.wallpapers.len(), 1);
         assert_eq!(back.wallpapers[0].monitor_name, r"\\.\DISPLAY1");
+    }
+
+    #[test]
+    fn state_files_without_battery_policy_default_to_pause() {
+        let json = format!(r#"{{"version":{STATE_VERSION},"wallpapers":[]}}"#);
+        let back: PersistedState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.on_battery, ipc::BatteryPolicy::Pause);
     }
 }

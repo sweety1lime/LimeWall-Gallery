@@ -127,6 +127,11 @@ enum DaemonCommand {
         #[arg(value_enum)]
         action: AutostartAction,
     },
+    /// Manage what playback does on battery power.
+    Battery {
+        #[arg(value_enum)]
+        action: BatteryAction,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -134,6 +139,17 @@ enum AutostartAction {
     Status,
     On,
     Off,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum BatteryAction {
+    Status,
+    /// Pause playback entirely on battery.
+    Pause,
+    /// Drop to the Eco profile on battery.
+    Eco,
+    /// Keep playing as configured.
+    Keep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +236,18 @@ fn ctl(endpoint: Option<&str>, command: DaemonCommand) -> anyhow::Result<()> {
             AutostartAction::On => ipc::Command::SetAutostart { enabled: true },
             AutostartAction::Off => ipc::Command::SetAutostart { enabled: false },
         },
+        DaemonCommand::Battery { action } => match action {
+            BatteryAction::Status => ipc::Command::GetBatteryPolicy,
+            BatteryAction::Pause => ipc::Command::SetBatteryPolicy {
+                policy: ipc::BatteryPolicy::Pause,
+            },
+            BatteryAction::Eco => ipc::Command::SetBatteryPolicy {
+                policy: ipc::BatteryPolicy::Eco,
+            },
+            BatteryAction::Keep => ipc::Command::SetBatteryPolicy {
+                policy: ipc::BatteryPolicy::Keep,
+            },
+        },
     };
     let response = ipc::send_request(&endpoint, &ipc::Request::new(1, command))
         .with_context(|| format!("failed to contact renderer at {endpoint:?}"))?;
@@ -283,6 +311,16 @@ fn print_daemon_result(result: ipc::ResponseData) -> anyhow::Result<()> {
             println!(
                 "autostart: {}",
                 if enabled { "enabled" } else { "disabled" }
+            );
+        }
+        ipc::ResponseData::BatteryPolicy { policy } => {
+            println!(
+                "battery policy: {}",
+                match policy {
+                    ipc::BatteryPolicy::Pause => "pause",
+                    ipc::BatteryPolicy::Eco => "eco",
+                    ipc::BatteryPolicy::Keep => "keep",
+                }
             );
         }
         ipc::ResponseData::Acknowledged { status } => {

@@ -82,7 +82,23 @@ pub enum Command {
     SetAutostart {
         enabled: bool,
     },
+    /// What playback does while the machine runs on battery.
+    GetBatteryPolicy,
+    SetBatteryPolicy {
+        policy: BatteryPolicy,
+    },
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatteryPolicy {
+    /// Pause decoding entirely (default: the most battery-friendly).
+    Pause,
+    /// Drop every session to the Eco profile until back on AC.
+    Eco,
+    /// Keep playing as configured.
+    Keep,
 }
 
 impl Command {
@@ -165,6 +181,7 @@ pub enum ResponseData {
     Monitors { monitors: Vec<Monitor> },
     Status { sessions: Vec<SessionStatus> },
     Autostart { enabled: bool },
+    BatteryPolicy { policy: BatteryPolicy },
     Acknowledged { status: String },
 }
 

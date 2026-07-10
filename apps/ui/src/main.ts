@@ -37,6 +37,7 @@ const el = <T extends HTMLElement>(id: string): T => {
 const daemonState = el<HTMLSpanElement>("daemon-state");
 const connectButton = el<HTMLButtonElement>("connect");
 const autostartCheckbox = el<HTMLInputElement>("autostart");
+const batterySelect = el<HTMLSelectElement>("battery");
 const monitorsBox = el<HTMLDivElement>("monitors");
 const sessionsBox = el<HTMLDivElement>("sessions");
 const fileInput = el<HTMLInputElement>("file");
@@ -98,6 +99,12 @@ async function connect() {
       autostartCheckbox.disabled = false;
     } catch {
       autostartCheckbox.disabled = true;
+    }
+    try {
+      batterySelect.value = await invoke<string>("get_battery_policy");
+      batterySelect.disabled = false;
+    } catch {
+      batterySelect.disabled = true;
     }
   } catch {
     setDisconnected();
@@ -353,6 +360,11 @@ window.addEventListener("DOMContentLoaded", () => {
       .catch(() => {
         autostartCheckbox.checked = !autostartCheckbox.checked;
       });
+  });
+  batterySelect.addEventListener("change", () => {
+    void call<string>("set_battery_policy", { policy: batterySelect.value })
+      .then((status) => report(status))
+      .catch(() => {});
   });
   volumeRange.addEventListener("input", () => {
     volumeValue.textContent = volumeRange.value;
