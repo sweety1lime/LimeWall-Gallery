@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 
 interface Monitor {
@@ -16,6 +17,15 @@ interface SessionStatus {
   quality: "eco" | "balanced" | "max";
   volume: number;
   anime4k: boolean;
+}
+
+interface LibraryItem {
+  id: string;
+  name: string;
+  kind: "video" | "image";
+  file: string;
+  preview: string | null;
+  imported_at: number;
 }
 
 const el = <T extends HTMLElement>(id: string): T => {
@@ -81,6 +91,7 @@ async function connect() {
     report("connected to renderer daemon");
     await refreshMonitors();
     await refreshSessions();
+    await refreshLibrary();
   } catch {
     setDisconnected();
   } finally {
@@ -139,6 +150,133 @@ async function refreshSessions() {
   }
 }
 
+const libraryBox = el<HTMLDivElement>("library");
+const previewCache = new Map<string, string>();
+
+async function refreshLibrary() {
+  const items = await call<LibraryItem[]>("library_list");
+  libraryBox.replaceChildren();
+  if (items.length === 0) {
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "Library is empty.";
+    libraryBox.append(hint);
+    return;
+  }
+  items.sort((a, b) => b.imported_at - a.imported_at);
+  for (const item of items) {
+    libraryBox.append(renderCard(item));
+  }
+}
+
+function renderCard(item: LibraryItem): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.title = item.file;
+
+  const thumb = document.createElement("div");
+  thumb.className = "thumb";
+  if (item.preview) {
+    const img = document.createElement("img");
+    const cached = previewCache.get(item.id);
+    if (cached) {
+      img.src = cached;
+    } else {
+      void call<string>("library_preview", { id: item.id })
+        .then((data) => {
+          const url = `data:image/jpeg;base64,${data}`;
+          previewCache.set(item.id, url);
+          img.src = url;
+        })
+        .catch(() => {});
+    }
+    thumb.append(img);
+  } else {
+    thumb.textContent = item.kind === "video" ? "video" : "image";
+  }
+  card.append(thumb);
+
+  const name = document.createElement("div");
+  name.className = "name";
+  name.textContent = item.name;
+  card.append(name);
+
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
+  const applyButton = document.createElement("button");
+  applyButton.textContent = "Apply";
+  applyButton.className = "primary";
+  applyButton.addEventListener("click", () => void applyLibraryItem(item));
+  const removeButton = document.createElement("button");
+  removeButton.textContent = "✕";
+  removeButton.title = "Remove from library";
+  removeButton.addEventListener("click", () => {
+    void call<void>("library_remove", { id: item.id }).then(() => {
+      previewCache.delete(item.id);
+      void refreshLibrary();
+    });
+  });
+  actions.append(applyButton, removeButton);
+  card.append(actions);
+  return card;
+}
+
+async function applyLibraryItem(item: LibraryItem) {
+  fileInput.value = item.file;
+  const status = await call<string>("play", {
+    path: item.file,
+    monitor: selectedMonitor,
+    quality: qualitySelect.value,
+    volume: Number(volumeRange.value),
+    anime4k: anime4kCheckbox.checked,
+  });
+  report(status);
+  await refreshSessions();
+}
+
+async function importPaths(paths: string[]) {
+  for (const path of paths) {
+    report(`importing ${path}…`);
+    try {
+      const item = await call<LibraryItem>("library_import", { path });
+      report(`imported ${item.name}`);
+    } catch {
+      // error already reported by call()
+    }
+  }
+  await refreshLibrary();
+}
+
+async function importDialog() {
+  const picked = await open({
+    multiple: true,
+    filters: [
+      {
+        name: "Media",
+        extensions: [
+          "mp4",
+          "mkv",
+          "webm",
+          "mov",
+          "avi",
+          "m4v",
+          "gif",
+          "png",
+          "jpg",
+          "jpeg",
+          "bmp",
+          "webp",
+        ],
+      },
+    ],
+  });
+  if (Array.isArray(picked)) {
+    await importPaths(picked);
+  } else if (typeof picked === "string") {
+    await importPaths([picked]);
+  }
+}
+
 async function browse() {
   const picked = await open({
     multiple: false,
@@ -191,6 +329,12 @@ async function simple(command: "pause" | "resume" | "stop") {
 
 window.addEventListener("DOMContentLoaded", () => {
   connectButton.addEventListener("click", () => void connect());
+  el<HTMLButtonElement>("import").addEventListener("click", () => void importDialog());
+  void getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type === "drop") {
+      void importPaths(event.payload.paths);
+    }
+  });
   el<HTMLButtonElement>("browse").addEventListener("click", () => void browse());
   el<HTMLButtonElement>("apply").addEventListener("click", () => void apply());
   el<HTMLButtonElement>("pause").addEventListener("click", () => void simple("pause"));

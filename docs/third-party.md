@@ -16,6 +16,18 @@
 - **TODO до публичного релиза**: собственная CI-сборка mpv с `-Dgpl=false` и LGPL-конфигом
   ffmpeg — сторонняя сборка удобна для разработки, но лицензионную гарантию даёт только своя.
 
+## ffmpeg (LGPLv3)
+
+- **Что**: `ffmpeg.exe` для импорт-пайплайна библиотеки (GIF → mp4, jpg-превью).
+  Запускается отдельным процессом — в наш код ничего не линкуется.
+- **Источник**: <https://github.com/zhongfly/mpv-winbuild>, релиз **2026-07-10-e5486b96d7**,
+  артефакт `ffmpeg-lgpl-x86_64-git-35f8f4bdc.7z` (сборка с `--enable-version3`, без GPL-компонентов).
+- **SHA-256 архива**: `4EBCF42AF804FC5B6119C1C2D248B2509707A773A3A1F76B81F97E77BE353E48`.
+- **Как получить**: `scripts/fetch-ffmpeg.ps1`; в репозиторий бинарник не коммитится.
+- **Важно про энкодеры**: libx264 в LGPL-сборке отсутствует (он GPL). GIF → mp4 кодируется
+  `h264_mf` (Windows MediaFoundation, есть на любой Windows 10+), фолбэк — `libvpx-vp9` (BSD).
+  Решение зафиксировано в docs/research/ffmpeg-import.md.
+
 ## FSR.glsl (MIT)
 
 - **Что**: порт AMD FidelityFX Super Resolution 1.0.2 (EASU + RCAS) для mpv `glsl-shaders`.
@@ -49,6 +61,10 @@
 | interprocess 2.4.2 | 0BSD OR Apache-2.0 | локальные сокеты: Windows named pipes / Unix sockets |
 | tauri 2 / tauri-build 2 | MIT OR Apache-2.0 | каркас UI (apps/ui) |
 | tauri-plugin-dialog 2 / tauri-plugin-opener 2 | MIT OR Apache-2.0 | нативный файловый диалог; открытие ссылок |
+| dirs 6 | MIT OR Apache-2.0 | путь к %APPDATA% (библиотека) |
+| sha2 0.10 | MIT OR Apache-2.0 | content-id элементов библиотеки |
+| base64 0.22 | MIT OR Apache-2.0 | превью через invoke |
+| tempfile 3 (dev) | MIT OR Apache-2.0 | временные каталоги в тестах |
 
 ## Frontend-зависимости UI (npm, apps/ui)
 

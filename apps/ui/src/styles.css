@@ -107,6 +107,60 @@ body {
   overflow-wrap: anywhere;
 }
 
+.library {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.card {
+  background: #14161b;
+  border: 1px solid #2a2e38;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.thumb {
+  aspect-ratio: 16 / 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #4d5563;
+  background: #0f1115;
+  overflow: hidden;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.card .name {
+  padding: 6px 8px 2px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-actions {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px 8px;
+}
+
+.card-actions button {
+  padding: 4px 10px;
+  font-size: 0.8rem;
+}
+
+.card-actions .primary {
+  flex: 1;
+}
+
 input[type="text"] {
   flex: 1;
   background: #14161b;
