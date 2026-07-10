@@ -44,8 +44,18 @@ renderer ctl pause | resume | volume 30 | quality eco | stop | status | shutdown
 
 Control UI (`apps/ui`, Tauri 2 + vanilla TS): finds or starts the daemon,
 lists monitors, keeps a media library (drag-and-drop import, GIF converted to
-mp4), applies wallpapers with quality/volume controls. Run with
-`cd apps/ui && npm install && npm run tauri dev`.
+mp4), applies wallpapers with quality/volume controls. Run it like this:
+
+```
+cd apps/ui
+npm install
+npm run tauri dev
+```
+
+Notes: in Windows PowerShell 5 there is no `&&` — run the commands one per
+line as above. The first `tauri dev` compiles the whole Tauri stack and can
+take several minutes before the window appears; with a fullscreen app in the
+foreground the window may open behind it (check the taskbar).
 
 The daemon owns a tray icon (pause all / resume all / open UI / quit),
 persists applied wallpapers and restores them on start; autostart with
