@@ -125,7 +125,7 @@ Watchdog (обязателен из-за пересоздания WorkerW):
 ## 5. Лицензионная чистота
 
 - Изучены **MIT/Apache** реализации: `meslzy/tauri-plugin-wallpaper` (MIT,
-  dual-path discovery), `ohkashi/LiveWallpaper` (MIT), `yadokani389/bevy_live_wallpaper`
+  dual-path discovery), `ohkashi/LimeWallpaper` (MIT), `yadokani389/bevy_live_wallpaper`
   (MIT/Apache). Идеи подтверждены, код не копировался — наша реализация пишется
   с нуля на crate `windows` (MIT/Apache-2.0).
 - GPL-проекты (Lively): читались **только** issue-треки и release notes

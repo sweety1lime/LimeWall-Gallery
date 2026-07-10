@@ -41,6 +41,12 @@ body {
   margin: 0;
 }
 
+.header .brand {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: #7dbf6a;
+}
+
 .daemon {
   display: flex;
   align-items: center;

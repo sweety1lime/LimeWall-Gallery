@@ -48,11 +48,11 @@ pub struct Library {
 }
 
 impl Library {
-    /// Library in the per-user data directory (%APPDATA%/LiveWall/library).
+    /// Library in the per-user data directory (%APPDATA%/LimeWall/library).
     pub fn default_location() -> Result<Self, String> {
         let data = dirs::data_dir().ok_or("no per-user data directory on this system")?;
         Ok(Self {
-            root: data.join("LiveWall").join("library"),
+            root: data.join("LimeWall").join("library"),
         })
     }
 
@@ -364,7 +364,7 @@ fn generate_preview(media: &Path, kind: MediaKind, target: &Path) -> Result<(), 
 
 fn ffmpeg_command() -> Result<Command, String> {
     let ffmpeg = ffmpeg_path().ok_or_else(|| {
-        "ffmpeg not found: run scripts/fetch-ffmpeg.ps1 or set LIVEWALL_FFMPEG".to_owned()
+        "ffmpeg not found: run scripts/fetch-ffmpeg.ps1 or set LIMEWALL_FFMPEG".to_owned()
     })?;
     let mut command = Command::new(ffmpeg);
     #[cfg(windows)]
@@ -397,7 +397,7 @@ fn ffmpeg_path() -> Option<PathBuf> {
         "ffmpeg"
     };
     let mut candidates = Vec::new();
-    if let Ok(explicit) = std::env::var("LIVEWALL_FFMPEG") {
+    if let Ok(explicit) = std::env::var("LIMEWALL_FFMPEG") {
         candidates.push(PathBuf::from(explicit));
     }
     if let Ok(ui_exe) = std::env::current_exe()

@@ -31,7 +31,7 @@ const CMD_RESUME_ALL: usize = 2;
 const CMD_OPEN_UI: usize = 3;
 const CMD_QUIT: usize = 4;
 
-const TRAY_CLASS: windows::core::PCWSTR = w!("LiveWallTray");
+const TRAY_CLASS: windows::core::PCWSTR = w!("LimeWallTray");
 
 thread_local! {
     static TRAY: std::cell::RefCell<Option<TrayState>> = const { std::cell::RefCell::new(None) };
@@ -152,7 +152,7 @@ fn init_tray_window() -> Result<HWND> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             TRAY_CLASS,
-            w!("LiveWall tray"),
+            w!("LimeWall tray"),
             WS_OVERLAPPED,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -220,7 +220,7 @@ fn show_menu(window: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, CMD_PAUSE_ALL, w!("Pause all"));
         let _ = AppendMenuW(menu, MF_STRING, CMD_RESUME_ALL, w!("Resume all"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN_UI, w!("Open LiveWall"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN_UI, w!("Open LimeWall"));
         let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit"));
 
         let mut cursor = Default::default();

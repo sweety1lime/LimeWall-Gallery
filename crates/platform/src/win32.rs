@@ -45,8 +45,8 @@ const WATCHDOG_INTERVAL_MS: u32 = 1000;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_COLOR: [u8; 3] = [0, 0, 0];
 
-const CONTROL_CLASS: windows::core::PCWSTR = w!("LiveWallControl");
-const SURFACE_CLASS: windows::core::PCWSTR = w!("LiveWallSurface");
+const CONTROL_CLASS: windows::core::PCWSTR = w!("LimeWallControl");
+const SURFACE_CLASS: windows::core::PCWSTR = w!("LimeWallSurface");
 
 fn hwnd(value: isize) -> HWND {
     HWND(value as *mut core::ffi::c_void)
@@ -315,7 +315,7 @@ fn init_worker() -> Result<isize> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CONTROL_CLASS,
-            w!("LiveWall control"),
+            w!("LimeWall control"),
             WINDOW_STYLE(0),
             0,
             0,
@@ -695,7 +695,7 @@ fn create_surface_window(
         CreateWindowExW(
             WS_EX_NOACTIVATE,
             SURFACE_CLASS,
-            w!("LiveWall surface"),
+            w!("LimeWall surface"),
             WS_CHILD,
             point.x,
             point.y,

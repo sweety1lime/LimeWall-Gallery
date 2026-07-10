@@ -40,7 +40,7 @@ const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 const WTS_SESSION_LOCK: usize = 0x7;
 const WTS_SESSION_UNLOCK: usize = 0x8;
 
-const WATCHER_CLASS: windows::core::PCWSTR = w!("LiveWallWatcher");
+const WATCHER_CLASS: windows::core::PCWSTR = w!("LimeWallWatcher");
 
 thread_local! {
     static WATCHER: std::cell::RefCell<Option<WatcherState>> =
@@ -183,7 +183,7 @@ fn init_watcher_window() -> Result<HWND> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             WATCHER_CLASS,
-            w!("LiveWall watcher"),
+            w!("LimeWall watcher"),
             WS_OVERLAPPED,
             CW_USEDEFAULT,
             CW_USEDEFAULT,

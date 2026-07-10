@@ -1,6 +1,6 @@
 [package]
 name = "wpk"
-description = "LiveWall wallpaper package (.wpk): zip container with a manifest"
+description = "LimeWall wallpaper package (.wpk): zip container with a manifest"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

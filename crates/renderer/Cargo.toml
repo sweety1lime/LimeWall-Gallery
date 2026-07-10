@@ -1,6 +1,6 @@
 [package]
 name = "renderer"
-description = "LiveWall wallpaper renderer daemon and CLI"
+description = "LimeWall wallpaper renderer daemon and CLI"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

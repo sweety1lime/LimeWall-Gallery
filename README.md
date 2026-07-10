@@ -1,6 +1,6 @@
-# LiveWall
+# LimeWall
 
-Cross-platform live wallpaper engine (working title). Windows → Linux → macOS.
+Cross-platform live wallpaper engine by 2fame. Windows → Linux → macOS.
 Renders video / GIF (→ mp4) / images behind the desktop icons via libmpv, with GPU-side
 upscaling, at minimal system cost.
 

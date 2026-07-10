@@ -242,7 +242,7 @@ function renderCard(item: LibraryItem): HTMLElement {
 async function exportLibraryItem(item: LibraryItem) {
   const target = await save({
     defaultPath: `${item.name}.wpk`,
-    filters: [{ name: "LiveWall package", extensions: ["wpk"] }],
+    filters: [{ name: "LimeWall package", extensions: ["wpk"] }],
   });
   if (typeof target !== "string") return;
   await call<void>("library_export", { id: item.id, target });

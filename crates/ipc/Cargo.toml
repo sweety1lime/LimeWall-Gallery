@@ -1,6 +1,6 @@
 [package]
 name = "ipc"
-description = "Versioned local IPC protocol and framing for LiveWall"
+description = "Versioned local IPC protocol and framing for LimeWall"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

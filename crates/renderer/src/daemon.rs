@@ -24,7 +24,7 @@ const MAX_CONNECTIONS: usize = 16;
 const STATE_VERSION: u32 = 1;
 
 /// Name of the Run-key value used for autostart.
-const AUTOSTART_APP: &str = "LiveWall";
+const AUTOSTART_APP: &str = "LimeWall";
 
 pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<()> {
     let endpoint = endpoint
@@ -48,7 +48,7 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
     // The tray belongs to the daemon so it works while the UI is closed.
     // Headless operation (e.g. CI) is fine — just log and continue.
     let message_tx_watcher = message_tx.clone();
-    let _tray = match platform::tray::spawn("LiveWall", move |event| {
+    let _tray = match platform::tray::spawn("LimeWall", move |event| {
         let _ = message_tx.send(Message::Tray(event));
     }) {
         Ok(guard) => Some(guard),
@@ -117,10 +117,10 @@ enum Message {
     Activity(platform::watcher::ActivityEvent),
 }
 
-/// %APPDATA%/LiveWall/wallpapers.json (shared convention with the UI library
+/// %APPDATA%/LimeWall/wallpapers.json (shared convention with the UI library
 /// living next to it).
 fn default_state_path() -> Option<PathBuf> {
-    Some(dirs::data_dir()?.join("LiveWall").join("wallpapers.json"))
+    Some(dirs::data_dir()?.join("LimeWall").join("wallpapers.json"))
 }
 
 /// One decoded request plus the channel its response must go back through.
@@ -846,14 +846,14 @@ fn pause_reason(user: bool, global: bool, fullscreen: bool) -> &'static str {
 fn spawn_ui() -> Result<(), String> {
     let exe_name = if cfg!(windows) { "ui.exe" } else { "ui" };
     let mut candidates = Vec::new();
-    if let Ok(explicit) = std::env::var("LIVEWALL_UI") {
+    if let Ok(explicit) = std::env::var("LIMEWALL_UI") {
         candidates.push(PathBuf::from(explicit));
     }
     if let Ok(renderer) = std::env::current_exe()
         && let Some(dir) = renderer.parent()
     {
         candidates.push(dir.join(exe_name));
-        candidates.push(dir.join("LiveWall.exe"));
+        candidates.push(dir.join("LimeWall.exe"));
         // Development layout: target/debug next to the UI workspace build.
         candidates.push(
             dir.join("../../apps/ui/src-tauri/target/debug")
@@ -863,7 +863,7 @@ fn spawn_ui() -> Result<(), String> {
     let ui = candidates
         .into_iter()
         .find(|path| path.is_file())
-        .ok_or("UI executable not found (set LIVEWALL_UI)")?;
+        .ok_or("UI executable not found (set LIMEWALL_UI)")?;
     std::process::Command::new(&ui)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

@@ -11,7 +11,7 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Endpoint the UI talks to; overridable for tests and parallel setups.
 pub fn endpoint() -> String {
-    std::env::var("LIVEWALL_ENDPOINT").unwrap_or_else(|_| ipc::default_endpoint())
+    std::env::var("LIMEWALL_ENDPOINT").unwrap_or_else(|_| ipc::default_endpoint())
 }
 
 /// Sends one request and unwraps the protocol envelope.
@@ -32,7 +32,7 @@ pub fn ensure_daemon(endpoint: &str) -> Result<String, String> {
         return Ok(daemon_version);
     }
     let renderer = renderer_path().ok_or_else(|| {
-        "renderer executable not found: set LIVEWALL_RENDERER or build the workspace".to_owned()
+        "renderer executable not found: set LIMEWALL_RENDERER or build the workspace".to_owned()
     })?;
     spawn_detached(&renderer, endpoint)
         .map_err(|error| format!("failed to start {}: {error}", renderer.display()))?;
@@ -58,7 +58,7 @@ fn renderer_path() -> Option<PathBuf> {
         "renderer"
     };
     let mut candidates = Vec::new();
-    if let Ok(explicit) = std::env::var("LIVEWALL_RENDERER") {
+    if let Ok(explicit) = std::env::var("LIMEWALL_RENDERER") {
         candidates.push(PathBuf::from(explicit));
     }
     if let Ok(ui_exe) = std::env::current_exe()
@@ -105,7 +105,7 @@ mod tests {
             eprintln!("skipped: renderer executable is not built");
             return;
         };
-        let endpoint = format!("livewall-ui-test-{}.sock", std::process::id());
+        let endpoint = format!("limewall-ui-test-{}.sock", std::process::id());
 
         let version = ensure_daemon(&endpoint).expect("daemon should start and answer");
         assert!(!version.is_empty());

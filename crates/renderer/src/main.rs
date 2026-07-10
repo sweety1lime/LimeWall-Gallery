@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use playback::Quality;
 
 #[derive(Parser)]
-#[command(name = "renderer", about = "LiveWall wallpaper renderer", version)]
+#[command(name = "renderer", about = "LimeWall wallpaper renderer", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

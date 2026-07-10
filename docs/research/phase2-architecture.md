@@ -34,7 +34,7 @@ At UI startup:
 4. never tie renderer lifetime to the Tauri window/sidecar handle.
 
 Tauri supports bundled external binaries, but its sidecar examples model child
-processes controlled by the app. LiveWall needs the opposite lifetime, so the
+processes controlled by the app. LimeWall needs the opposite lifetime, so the
 Tauri Rust backend should resolve the bundled renderer path and spawn it
 detached. Source: <https://v2.tauri.app/develop/sidecar/>.
 
@@ -68,7 +68,7 @@ Why blocking I/O:
 - connection threads can forward decoded commands through `std::sync::mpsc`
   to the daemon thread that owns platform and mpv state.
 
-Endpoint name v1: a namespaced local-socket name derived from `livewall`, the
+Endpoint name v1: a namespaced local-socket name derived from `limewall`, the
 protocol major version and the current user identity. Binding the endpoint is
 also the single-daemon-instance lock. Exact Windows ACL/user-identity handling
 must be verified before accepting external commands.
@@ -193,7 +193,7 @@ Acceptance: close UI process, renderer continues; reopen UI and recover status.
 ### 2.2 — Library
 
 - define versioned library/config JSON schema;
-- use `%APPDATA%/LiveWall/library` through platform-appropriate data dirs;
+- use `%APPDATA%/LimeWall/library` through platform-appropriate data dirs;
 - atomic metadata writes and collision-safe content ids;
 - drag-and-drop and preview grid in UI.
 

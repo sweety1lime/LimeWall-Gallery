@@ -116,7 +116,7 @@ try {
     $labelFont = Keep ([System.Drawing.Font]::new("Consolas", 13, [System.Drawing.FontStyle]::Regular))
     $textBrush = Keep ([System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(242, 246, 255)))
     $mutedBrush = Keep ([System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(155, 180, 220)))
-    $graphics.DrawString("LiveWall 720p Upscale Test", $titleFont, $textBrush, 30, 22)
+    $graphics.DrawString("LimeWall 720p Upscale Test", $titleFont, $textBrush, 30, 22)
     $graphics.DrawString("1 px grid", $labelFont, $mutedBrush, 32, 312)
     $graphics.DrawString("diagonal 1 px / 2 px", $labelFont, $mutedBrush, 456, 312)
     $graphics.DrawString("cel contours", $labelFont, $mutedBrush, 520, 680)

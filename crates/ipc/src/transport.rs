@@ -61,7 +61,7 @@ pub fn default_endpoint() -> String {
     for byte in user.as_bytes().iter().take(48) {
         let _ = write!(tag, "{byte:02x}");
     }
-    format!("livewall-v{PROTOCOL_VERSION}-{tag}.sock")
+    format!("limewall-v{PROTOCOL_VERSION}-{tag}.sock")
 }
 
 fn create_listener(endpoint: &str) -> io::Result<Listener> {
@@ -127,13 +127,13 @@ mod tests {
 
     fn test_endpoint() -> String {
         let id = NEXT_ENDPOINT.fetch_add(1, Ordering::Relaxed);
-        format!("livewall-ipc-test-{}-{id}.sock", std::process::id())
+        format!("limewall-ipc-test-{}-{id}.sock", std::process::id())
     }
 
     #[test]
     fn default_endpoint_is_namespaced_and_user_specific() {
         let endpoint = default_endpoint();
-        assert!(endpoint.starts_with("livewall-v1-"));
+        assert!(endpoint.starts_with("limewall-v1-"));
         assert!(endpoint.ends_with(".sock"));
         assert!(!endpoint.contains('/') && !endpoint.contains('\\'));
     }

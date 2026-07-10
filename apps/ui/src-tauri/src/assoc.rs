@@ -1,7 +1,7 @@
 //! Per-user `.wpk` file association (HKCU\Software\Classes, no elevation):
 //! double-clicking a package opens this UI with the file as an argument.
 
-pub const PROG_ID: &str = "LiveWall.Package";
+pub const PROG_ID: &str = "LimeWall.Package";
 
 #[cfg(windows)]
 fn map<E: std::fmt::Display>(error: E) -> String {
@@ -20,7 +20,7 @@ pub fn register() -> Result<(), String> {
         .create(format!(r"Software\Classes\{PROG_ID}"))
         .map_err(map)?;
     progid
-        .set_string("", "LiveWall wallpaper package")
+        .set_string("", "LimeWall wallpaper package")
         .map_err(map)?;
 
     let command = root
