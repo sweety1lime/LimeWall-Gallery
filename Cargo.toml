@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ipc", "crates/mpv", "crates/platform", "crates/renderer"]
+members = ["crates/ipc", "crates/mpv", "crates/platform", "crates/renderer", "crates/wpk"]
 # The Tauri app builds in its own workspace: pulling the whole Tauri stack
 # into every `cargo build --workspace` would slow the core loop down.
 exclude = ["apps/ui/src-tauri"]

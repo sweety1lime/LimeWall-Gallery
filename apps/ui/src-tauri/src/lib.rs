@@ -1,3 +1,4 @@
+mod assoc;
 mod daemon_client;
 mod library;
 
@@ -169,6 +170,12 @@ async fn library_preview(id: String) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+/// Packs a library item into a `.wpk` file at the chosen location.
+#[tauri::command]
+async fn library_export(id: String, target: String) -> Result<(), String> {
+    blocking(move || library::Library::default_location()?.export(&id, Path::new(&target))).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -192,7 +199,47 @@ pub fn run() {
             library_import,
             library_remove,
             library_preview,
+            library_export,
         ])
+        .setup(|_app| {
+            // Double-clicking a .wpk should land here (per-user, no admin).
+            if let Err(error) = assoc::register() {
+                eprintln!("wpk association not registered: {error}");
+            }
+            // Packages passed on the command line (double-click) import now;
+            // the panel picks them up with its next library refresh.
+            let packages: Vec<std::path::PathBuf> = std::env::args_os()
+                .skip(1)
+                .map(std::path::PathBuf::from)
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("wpk"))
+                        && path.is_file()
+                })
+                .collect();
+            if !packages.is_empty() {
+                tauri::async_runtime::spawn_blocking(move || {
+                    let library = match library::Library::default_location() {
+                        Ok(library) => library,
+                        Err(error) => {
+                            eprintln!("library unavailable: {error}");
+                            return;
+                        }
+                    };
+                    for package in packages {
+                        match library.import(&package) {
+                            Ok(item) => {
+                                println!("imported {} from {}", item.name, package.display())
+                            }
+                            Err(error) => {
+                                eprintln!("failed to import {}: {error}", package.display());
+                            }
+                        }
+                    }
+                });
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

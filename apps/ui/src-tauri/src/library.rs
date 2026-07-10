@@ -28,7 +28,7 @@ pub enum MediaKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryItem {
     pub id: String,
-    /// Display name taken from the original file stem.
+    /// Display name: the original file stem, or the package name.
     pub name: String,
     pub kind: MediaKind,
     /// Absolute path of the imported media inside the library.
@@ -36,6 +36,11 @@ pub struct LibraryItem {
     pub preview: Option<PathBuf>,
     /// Unix seconds.
     pub imported_at: u64,
+    /// Metadata carried by .wpk packages; None for plain file imports.
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
 }
 
 pub struct Library {
@@ -70,6 +75,94 @@ impl Library {
         let source = source
             .canonicalize()
             .map_err(|error| format!("file not found: {error}"))?;
+        if source
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("wpk"))
+        {
+            return self.import_wpk(&source);
+        }
+        self.import_media(&source, None, None, None, None)
+    }
+
+    /// Unpacks a `.wpk` package and imports its entry, keeping the manifest
+    /// name, author and license.
+    fn import_wpk(&self, package: &Path) -> Result<LibraryItem, String> {
+        let manifest = wpk::read_manifest(package).map_err(|error| error.to_string())?;
+        match manifest.media_type {
+            wpk::MediaType::Video | wpk::MediaType::Image => {}
+            wpk::MediaType::Web | wpk::MediaType::Model3d => {
+                return Err("web and 3D packages are not supported yet (phase 6)".into());
+            }
+        }
+        // The package id is the identity across libraries — but it becomes a
+        // file name here, so anything unusual falls back to a content hash.
+        let package_id = Some(manifest.id.clone()).filter(|id| is_safe_id(id));
+        // Unpack next to the library so the rename-free import can read it.
+        let staging = self.root.join(".staging");
+        let staged_entry = staging.join(&manifest.entry);
+        wpk::extract_file(package, &manifest.entry, &staged_entry)
+            .map_err(|error| error.to_string())?;
+        let result = self.import_media(
+            &staged_entry,
+            Some(manifest.name.clone()),
+            Some(manifest.author.clone()),
+            Some(manifest.license.clone()),
+            package_id,
+        );
+        let _ = fs::remove_dir_all(&staging);
+        result
+    }
+
+    /// Exports a library item as a `.wpk` package.
+    pub fn export(&self, id: &str, target: &Path) -> Result<(), String> {
+        let index = self.load_index()?;
+        let item = index
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or_else(|| format!("library item {id} not found"))?;
+        let entry = item
+            .file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("library file has no usable name")?
+            .to_owned();
+        let preview_name = item
+            .preview
+            .as_ref()
+            .filter(|path| path.is_file())
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
+        let manifest = wpk::Manifest {
+            id: item.id.clone(),
+            media_type: match item.kind {
+                MediaKind::Video => wpk::MediaType::Video,
+                MediaKind::Image => wpk::MediaType::Image,
+            },
+            entry: entry.clone(),
+            name: item.name.clone(),
+            author: item.author.clone().unwrap_or_else(|| "unknown".into()),
+            license: item.license.clone().unwrap_or_else(|| "unknown".into()),
+            version: "1.0".into(),
+            preview: preview_name.clone(),
+            options: serde_json::Map::new(),
+        };
+        let mut files: Vec<(&str, &Path)> = vec![(entry.as_str(), item.file.as_path())];
+        if let (Some(name), Some(path)) = (&preview_name, &item.preview) {
+            files.push((name.as_str(), path.as_path()));
+        }
+        wpk::write_package(target, &manifest, &files).map_err(|error| error.to_string())
+    }
+
+    fn import_media(
+        &self,
+        source: &Path,
+        name: Option<String>,
+        author: Option<String>,
+        license: Option<String>,
+        forced_id: Option<String>,
+    ) -> Result<LibraryItem, String> {
         let extension = source
             .extension()
             .and_then(|e| e.to_str())
@@ -85,7 +178,10 @@ impl Library {
         };
 
         let mut index = self.load_index()?;
-        let id = content_id(&source)?;
+        let id = match forced_id {
+            Some(id) => id,
+            None => content_id(source)?,
+        };
         if let Some(existing) = index.iter().find(|item| item.id == id) {
             return Ok(existing.clone()); // already imported
         }
@@ -94,9 +190,9 @@ impl Library {
         let target_extension = if is_gif { "mp4" } else { extension.as_str() };
         let target = self.root.join(format!("{id}.{target_extension}"));
         if is_gif {
-            convert_gif_to_mp4(&source, &target)?;
+            convert_gif_to_mp4(source, &target)?;
         } else {
-            fs::copy(&source, &target).map_err(|error| format!("copy failed: {error}"))?;
+            fs::copy(source, &target).map_err(|error| format!("copy failed: {error}"))?;
         }
 
         let preview = self.root.join(format!("{id}.jpg"));
@@ -110,10 +206,12 @@ impl Library {
 
         let item = LibraryItem {
             id,
-            name: source
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "unnamed".into()),
+            name: name.unwrap_or_else(|| {
+                source
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "unnamed".into())
+            }),
             kind,
             file: target,
             preview,
@@ -121,6 +219,8 @@ impl Library {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            author,
+            license,
         };
         index.push(item.clone());
         self.save_index(&index)?;
@@ -171,6 +271,15 @@ impl Library {
         fs::write(&temporary, json).map_err(|error| error.to_string())?;
         fs::rename(&temporary, self.index_path()).map_err(|error| error.to_string())
     }
+}
+
+/// Package ids double as file names; anything beyond this charset is unsafe.
+fn is_safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Stable item id: content hash, so re-importing the same file deduplicates.
@@ -378,6 +487,43 @@ mod tests {
         assert_eq!(item.kind, MediaKind::Image);
         assert_eq!(item.file.extension().unwrap(), "png");
         assert!(item.preview.as_ref().is_some_and(|p| p.is_file()));
+    }
+
+    #[test]
+    fn wpk_export_import_round_trips() {
+        if ffmpeg_path().is_none() {
+            eprintln!("skipped: ffmpeg not fetched");
+            return;
+        }
+        let temp = tempfile::tempdir().expect("temp dir");
+        let library = Library::at(temp.path().join("library"));
+
+        let gif = temp.path().join("loop.gif");
+        generate(
+            &["-f", "lavfi", "-i", "testsrc=duration=1:size=64x48:rate=10"],
+            &gif,
+        );
+        let item = library.import(&gif).expect("gif import");
+
+        let package = temp.path().join("loop.wpk");
+        library.export(&item.id, &package).expect("export");
+        let manifest = wpk::read_manifest(&package).expect("exported package is valid");
+        assert_eq!(manifest.id, item.id);
+        assert_eq!(manifest.name, "loop");
+        assert_eq!(manifest.author, "unknown");
+
+        // Import into a fresh library keeps identity and metadata.
+        let second = Library::at(temp.path().join("library2"));
+        let restored = second.import(&package).expect("wpk import");
+        assert_eq!(restored.id, item.id);
+        assert_eq!(restored.name, "loop");
+        assert_eq!(restored.author.as_deref(), Some("unknown"));
+        assert!(restored.file.is_file());
+        assert_eq!(
+            std::fs::read(&restored.file).expect("restored media"),
+            std::fs::read(&item.file).expect("original media"),
+            "package must carry the converted mp4 byte for byte"
+        );
     }
 
     #[test]

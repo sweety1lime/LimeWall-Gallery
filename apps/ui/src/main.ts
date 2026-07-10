@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 interface Monitor {
   id: number;
@@ -221,6 +221,10 @@ function renderCard(item: LibraryItem): HTMLElement {
   applyButton.textContent = "Apply";
   applyButton.className = "primary";
   applyButton.addEventListener("click", () => void applyLibraryItem(item));
+  const exportButton = document.createElement("button");
+  exportButton.textContent = "⇪";
+  exportButton.title = "Export as .wpk package";
+  exportButton.addEventListener("click", () => void exportLibraryItem(item));
   const removeButton = document.createElement("button");
   removeButton.textContent = "✕";
   removeButton.title = "Remove from library";
@@ -230,9 +234,19 @@ function renderCard(item: LibraryItem): HTMLElement {
       void refreshLibrary();
     });
   });
-  actions.append(applyButton, removeButton);
+  actions.append(applyButton, exportButton, removeButton);
   card.append(actions);
   return card;
+}
+
+async function exportLibraryItem(item: LibraryItem) {
+  const target = await save({
+    defaultPath: `${item.name}.wpk`,
+    filters: [{ name: "LiveWall package", extensions: ["wpk"] }],
+  });
+  if (typeof target !== "string") return;
+  await call<void>("library_export", { id: item.id, target });
+  report(`exported ${item.name} to ${target}`);
 }
 
 async function applyLibraryItem(item: LibraryItem) {
@@ -266,7 +280,7 @@ async function importDialog() {
     multiple: true,
     filters: [
       {
-        name: "Media",
+        name: "Media and packages",
         extensions: [
           "mp4",
           "mkv",
@@ -280,6 +294,7 @@ async function importDialog() {
           "jpeg",
           "bmp",
           "webp",
+          "wpk",
         ],
       },
     ],

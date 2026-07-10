@@ -49,7 +49,15 @@ mp4), applies wallpapers with quality/volume controls. Run with
 
 The daemon owns a tray icon (pause all / resume all / open UI / quit),
 persists applied wallpapers and restores them on start; autostart with
-Windows is a checkbox in the UI (or `renderer ctl autostart on|off`). Anime4K Mode B Fast also passes an end-to-end
+Windows is a checkbox in the UI (or `renderer ctl autostart on|off`).
+
+Politeness rules pause decoding (0% CPU) behind fullscreen apps, on the
+lock screen, with the display off, and on battery power (configurable:
+pause / eco profile / keep playing).
+
+Wallpapers can be shared as `.wpk` packages (zip + manifest): export any
+library item from its card, import by file dialog, drag-and-drop or
+double-click. Anime4K Mode B Fast also passes an end-to-end
 shader-loading smoke test on Windows 10 22H2.
 
 Phase 2 foundation has started with a standalone `crates/ipc`: versioned and

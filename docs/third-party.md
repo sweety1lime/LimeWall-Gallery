@@ -64,6 +64,8 @@
 | dirs 6 | MIT OR Apache-2.0 | путь к %APPDATA% (библиотека) |
 | sha2 0.10 | MIT OR Apache-2.0 | content-id элементов библиотеки |
 | base64 0.22 | MIT OR Apache-2.0 | превью через invoke |
+| zip 8 | MIT | контейнер .wpk (crates/wpk) |
+| windows-registry 0.5 | MIT OR Apache-2.0 | ассоциация .wpk в HKCU |
 | tempfile 3 (dev) | MIT OR Apache-2.0 | временные каталоги в тестах |
 
 ## Frontend-зависимости UI (npm, apps/ui)
