@@ -1,8 +1,13 @@
+mod daemon;
+mod playback;
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+
+use playback::Quality;
 
 #[derive(Parser)]
 #[command(name = "renderer", about = "LiveWall wallpaper renderer", version)]
@@ -57,20 +62,62 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DaemonCommand {
+    /// Check that the daemon is alive.
     Ping,
+    /// List monitors as seen by the daemon.
     ListMonitors,
+    /// Show active wallpaper sessions.
     Status,
+    /// Stop all sessions and exit the daemon.
     Shutdown,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum Quality {
-    /// Cheapest scaling (bilinear), no shaders.
-    Eco,
-    /// Lanczos scaling (default).
-    Balanced,
-    /// Lanczos + FSR shaders when the source is smaller than the monitor.
-    Max,
+    /// Start or replace playback on a monitor.
+    Play {
+        /// Path to the media file.
+        file: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        monitor: platform::MonitorId,
+        #[arg(long, value_enum, default_value_t = Quality::Balanced)]
+        quality: Quality,
+        /// Volume 0-100; 0 keeps the player muted.
+        #[arg(long, default_value_t = 0)]
+        volume: u8,
+        /// Use the Anime4K Mode B (Fast) shader chain while upscaling.
+        #[arg(long)]
+        anime4k: bool,
+    },
+    /// Stop playback on one monitor, or everywhere.
+    Stop {
+        #[arg(long)]
+        monitor: Option<platform::MonitorId>,
+    },
+    /// Pause decoding on one monitor, or everywhere.
+    Pause {
+        #[arg(long)]
+        monitor: Option<platform::MonitorId>,
+    },
+    /// Resume decoding on one monitor, or everywhere.
+    Resume {
+        #[arg(long)]
+        monitor: Option<platform::MonitorId>,
+    },
+    /// Change volume of a running session.
+    Volume {
+        /// Volume 0-100; 0 mutes.
+        volume: u8,
+        #[arg(long, default_value_t = 0)]
+        monitor: platform::MonitorId,
+    },
+    /// Change the quality profile of a running session.
+    Quality {
+        /// Upscaling/quality profile.
+        #[arg(value_enum)]
+        quality: Quality,
+        #[arg(long, default_value_t = 0)]
+        monitor: platform::MonitorId,
+        /// Use the Anime4K Mode B (Fast) shader chain while upscaling.
+        #[arg(long)]
+        anime4k: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,118 +153,14 @@ fn main() -> anyhow::Result<()> {
             volume,
             anime4k,
         } => play(&file, monitor, quality, volume, anime4k),
-        Command::Serve { endpoint } => serve(endpoint.as_deref()),
+        Command::Serve { endpoint } => daemon::run(endpoint.as_deref()),
         Command::Ctl { endpoint, command } => ctl(endpoint.as_deref(), command),
     }
 }
 
 // ---------------------------------------------------------------------------
-// daemon skeleton
+// ctl client
 // ---------------------------------------------------------------------------
-
-fn serve(endpoint: Option<&str>) -> anyhow::Result<()> {
-    let endpoint = endpoint
-        .map(str::to_owned)
-        .unwrap_or_else(ipc::default_endpoint);
-    let host = platform::create_host().context("failed to initialize wallpaper host")?;
-    let server = ipc::LocalServer::bind(&endpoint)
-        .with_context(|| format!("failed to bind renderer endpoint {endpoint:?}"))?;
-    println!("renderer daemon listening at {endpoint}");
-
-    loop {
-        let mut stream = server.accept().context("failed to accept IPC client")?;
-        if handle_daemon_connection(&mut stream, host.as_ref())? {
-            break;
-        }
-    }
-    println!("renderer daemon stopped");
-    Ok(())
-}
-
-fn handle_daemon_connection(
-    stream: &mut ipc::LocalStream,
-    host: &dyn platform::WallpaperHost,
-) -> anyhow::Result<bool> {
-    let request: ipc::Request = match ipc::read_frame(stream) {
-        Ok(request) => request,
-        Err(error) => {
-            let response = ipc::Response::error(
-                0,
-                ipc::ErrorCode::InvalidRequest,
-                format!("invalid IPC frame: {error}"),
-            );
-            let _ = ipc::write_frame(stream, &response);
-            eprintln!("rejected invalid IPC frame: {error}");
-            return Ok(false);
-        }
-    };
-    let shutdown = matches!(request.command, ipc::Command::Shutdown);
-    let response = daemon_response(host, request);
-    ipc::write_frame(stream, &response).context("failed to write IPC response")?;
-    Ok(shutdown && matches!(response.body, ipc::ResponseBody::Success { .. }))
-}
-
-fn daemon_response(host: &dyn platform::WallpaperHost, request: ipc::Request) -> ipc::Response {
-    if let Err(error) = request.validate() {
-        let code = if matches!(error, ipc::ValidationError::UnsupportedVersion { .. }) {
-            ipc::ErrorCode::UnsupportedVersion
-        } else {
-            ipc::ErrorCode::InvalidRequest
-        };
-        return ipc::Response::error(request.id, code, error.to_string());
-    }
-
-    let id = request.id;
-    match request.command {
-        ipc::Command::Ping => ipc::Response::success(
-            id,
-            ipc::ResponseData::Pong {
-                daemon_version: env!("CARGO_PKG_VERSION").into(),
-            },
-        ),
-        ipc::Command::ListMonitors => match host.enumerate_monitors() {
-            Ok(monitors) => ipc::Response::success(
-                id,
-                ipc::ResponseData::Monitors {
-                    monitors: monitors.into_iter().map(monitor_to_ipc).collect(),
-                },
-            ),
-            Err(error) => ipc::Response::error(id, ipc::ErrorCode::Internal, error.to_string()),
-        },
-        ipc::Command::Status => ipc::Response::success(
-            id,
-            ipc::ResponseData::Status {
-                sessions: Vec::new(),
-            },
-        ),
-        ipc::Command::Shutdown => ipc::Response::success(
-            id,
-            ipc::ResponseData::Acknowledged {
-                status: "shutting_down".into(),
-            },
-        ),
-        _ => ipc::Response::error(
-            id,
-            ipc::ErrorCode::InvalidRequest,
-            "playback commands are not implemented until phase 2.1c",
-        ),
-    }
-}
-
-fn monitor_to_ipc(monitor: platform::MonitorInfo) -> ipc::Monitor {
-    ipc::Monitor {
-        id: monitor.id,
-        name: monitor.name,
-        bounds: ipc::Rect {
-            x: monitor.bounds.x,
-            y: monitor.bounds.y,
-            width: monitor.bounds.width,
-            height: monitor.bounds.height,
-        },
-        scale: monitor.scale,
-        is_primary: monitor.is_primary,
-    }
-}
 
 fn ctl(endpoint: Option<&str>, command: DaemonCommand) -> anyhow::Result<()> {
     let endpoint = endpoint
@@ -228,6 +171,34 @@ fn ctl(endpoint: Option<&str>, command: DaemonCommand) -> anyhow::Result<()> {
         DaemonCommand::ListMonitors => ipc::Command::ListMonitors,
         DaemonCommand::Status => ipc::Command::Status,
         DaemonCommand::Shutdown => ipc::Command::Shutdown,
+        DaemonCommand::Play {
+            file,
+            monitor,
+            quality,
+            volume,
+            anime4k,
+        } => ipc::Command::Play {
+            monitor,
+            path: file
+                .canonicalize()
+                .with_context(|| format!("file not found: {}", file.display()))?,
+            quality: quality.into(),
+            volume,
+            anime4k,
+        },
+        DaemonCommand::Stop { monitor } => ipc::Command::Stop { monitor },
+        DaemonCommand::Pause { monitor } => ipc::Command::Pause { monitor },
+        DaemonCommand::Resume { monitor } => ipc::Command::Resume { monitor },
+        DaemonCommand::Volume { volume, monitor } => ipc::Command::SetVolume { monitor, volume },
+        DaemonCommand::Quality {
+            quality,
+            monitor,
+            anime4k,
+        } => ipc::Command::SetQuality {
+            monitor,
+            quality: quality.into(),
+            anime4k,
+        },
     };
     let response = ipc::send_request(&endpoint, &ipc::Request::new(1, command))
         .with_context(|| format!("failed to contact renderer at {endpoint:?}"))?;
@@ -260,7 +231,32 @@ fn print_daemon_result(result: ipc::ResponseData) -> anyhow::Result<()> {
             }
         }
         ipc::ResponseData::Status { sessions } => {
-            println!("active sessions: {}", sessions.len());
+            if sessions.is_empty() {
+                println!("no active sessions");
+            }
+            for session in sessions {
+                println!(
+                    "monitor {}: {} {}  quality {}{}  volume {}",
+                    session.monitor,
+                    match session.state {
+                        ipc::PlaybackState::Playing => "playing",
+                        ipc::PlaybackState::Paused => "paused",
+                        ipc::PlaybackState::Stopped => "stopped",
+                    },
+                    session
+                        .path
+                        .as_deref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "-".into()),
+                    match session.quality {
+                        ipc::Quality::Eco => "eco",
+                        ipc::Quality::Balanced => "balanced",
+                        ipc::Quality::Max => "max",
+                    },
+                    if session.anime4k { " + anime4k" } else { "" },
+                    session.volume
+                );
+            }
         }
         ipc::ResponseData::Acknowledged { status } => {
             println!("{status}");
@@ -268,6 +264,10 @@ fn print_daemon_result(result: ipc::ResponseData) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// interactive commands
+// ---------------------------------------------------------------------------
 
 /// Creates the host, prints the monitor list and returns the target monitor.
 fn pick_monitor(
@@ -327,10 +327,6 @@ fn test_surface(monitor: platform::MonitorId, color: Rgb) -> anyhow::Result<()> 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// play
-// ---------------------------------------------------------------------------
-
 /// Commands accepted on stdin while playing.
 #[derive(Debug, PartialEq, Eq)]
 enum Control {
@@ -383,95 +379,21 @@ fn play_on_surface(
 ) -> anyhow::Result<()> {
     let wid = host.surface_native_handle(surface)?;
 
-    let api = load_libmpv()?;
+    let api = playback::load_libmpv()?;
     let (major, minor) = api.version();
     println!("libmpv loaded, client API v{major}.{minor}");
 
-    let wid_string = wid.to_string();
-    let volume_string = f64::from(volume).to_string();
-    let mut options: Vec<(&str, &str)> = vec![
-        ("wid", wid_string.as_str()),
-        // Hardware decoding with safe fallback (D3D11VA on Windows).
-        ("hwdec", "auto-safe"),
-        ("loop-file", "inf"),
-        // Static images stay up forever through the same pipeline.
-        ("image-display-duration", "inf"),
-        // Fill the monitor without black bars (crop instead of letterbox).
-        ("panscan", "1.0"),
-        // A wallpaper must never keep the system awake.
-        ("stop-screensaver", "no"),
-        // Known 24H2 fix: without it the surface may not cover the screen.
-        ("border", "no"),
-        // Headless embedding: no OSD, no scripts, no input handling.
-        ("input-default-bindings", "no"),
-        ("osd-level", "0"),
-        ("load-scripts", "no"),
-        ("config", "no"),
-        // Capture the same GPU-rendered output (including GLSL shaders) that
-        // is visible in the wallpaper window.
-        ("screenshot-sw", "no"),
-    ];
-    options.push(("mute", if volume == 0 { "yes" } else { "no" }));
-    if volume > 0 {
-        options.push(("volume", volume_string.as_str()));
-    }
-    match quality {
-        Quality::Eco => {
-            options.push(("scale", "bilinear"));
-            options.push(("dscale", "bilinear"));
-            options.push(("cscale", "bilinear"));
-        }
-        Quality::Balanced | Quality::Max => options.push(("scale", "lanczos")),
-    }
-
-    let player = mpv::Player::new(api, &options).context("failed to initialize mpv")?;
-    player
-        .command(&["loadfile", &file.to_string_lossy()])
-        .context("loadfile failed")?;
-
-    // Wait for the file to load so we can inspect what we are playing.
-    let mut loaded = false;
-    for _ in 0..60 {
-        match player.wait_event(0.25) {
-            Some(mpv::Event::FileLoaded) => {
-                loaded = true;
-                break;
-            }
-            Some(mpv::Event::EndFile) => anyhow::bail!("mpv could not play the file"),
-            _ => {}
-        }
-    }
-    anyhow::ensure!(loaded, "timed out waiting for the file to load");
-
-    let (width, height) = video_size(&player);
-    let codec = player
-        .get_property_str("video-codec")
-        .unwrap_or_else(|_| "unknown".into());
+    let started = playback::start_player(api, wid, file, quality, volume, anime4k, info)?;
     println!(
-        "playing {} ({codec}, {width}x{height}) on monitor {}",
+        "playing {} ({}, {}x{}) on monitor {}",
         file.display(),
+        started.codec,
+        started.width,
+        started.height,
         info.id
     );
-
-    // hwdec-current settles once decoding actually starts.
-    let mut hwdec = String::from("no");
-    for _ in 0..20 {
-        if let Ok(current) = player.get_property_str("hwdec-current")
-            && !current.is_empty()
-            && current != "no"
-        {
-            hwdec = current;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(150));
-    }
-    println!("hardware decoding: {hwdec}");
-
-    if anime4k {
-        apply_anime4k(&player, width, height, info)?;
-    } else if quality == Quality::Max {
-        apply_fsr(&player, width, height, info)?;
-    }
+    println!("hardware decoding: {}", started.hwdec);
+    let player = started.player;
 
     let controls = spawn_control_channel()?;
     println!("controls: pause | resume | volume <0-100> | screenshot <path> | stop (or Ctrl+C)");
@@ -486,8 +408,7 @@ fn play_on_surface(
                 println!("resumed");
             }
             Ok(Control::Volume(v)) => {
-                player.set_property_bool("mute", v == 0)?;
-                player.set_property_f64("volume", f64::from(v))?;
+                playback::set_volume(&player, v)?;
                 println!("volume: {v}");
             }
             Ok(Control::Screenshot(path)) => {
@@ -501,127 +422,6 @@ fn play_on_surface(
     // Player must shut down before the surface window is destroyed.
     drop(player);
     Ok(())
-}
-
-fn video_size(player: &mpv::Player) -> (i64, i64) {
-    // video-params appears shortly after FILE_LOADED; retry briefly.
-    for _ in 0..20 {
-        let size = player
-            .get_property_i64("video-params/w")
-            .and_then(|w| player.get_property_i64("video-params/h").map(|h| (w, h)));
-        if let Ok(size) = size {
-            return size;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    (0, 0)
-}
-
-/// Enables the FSR shader only when the source is smaller than the monitor
-/// (upscaling); at native size or above it would only waste GPU cycles.
-fn apply_fsr(
-    player: &mpv::Player,
-    width: i64,
-    height: i64,
-    info: &platform::MonitorInfo,
-) -> anyhow::Result<()> {
-    if width <= 0 || height <= 0 {
-        println!("FSR skipped: unknown source size");
-        return Ok(());
-    }
-    if !needs_upscaling(width, height, info) {
-        println!("FSR skipped: source ({width}x{height}) >= monitor resolution");
-        return Ok(());
-    }
-    let Some(shader) = find_fsr_shader() else {
-        println!("FSR skipped: assets/shaders/FSR.glsl not found");
-        return Ok(());
-    };
-    // mpv wants forward slashes in list options on all platforms.
-    let shader = shader.to_string_lossy().replace('\\', "/");
-    player.set_property_str("glsl-shaders", &shader)?;
-    println!("FSR upscaling enabled ({shader})");
-    Ok(())
-}
-
-const ANIME4K_MODE_B_FAST: [&str; 6] = [
-    "Anime4K_Clamp_Highlights.glsl",
-    "Anime4K_Restore_CNN_Soft_M.glsl",
-    "Anime4K_Upscale_CNN_x2_M.glsl",
-    "Anime4K_AutoDownscalePre_x2.glsl",
-    "Anime4K_AutoDownscalePre_x4.glsl",
-    "Anime4K_Upscale_CNN_x2_S.glsl",
-];
-
-/// Enables Anime4K's official Mode B (Fast) chain only while upscaling.
-/// Anime4K replaces FSR when both `--quality max` and `--anime4k` are set.
-fn apply_anime4k(
-    player: &mpv::Player,
-    width: i64,
-    height: i64,
-    info: &platform::MonitorInfo,
-) -> anyhow::Result<()> {
-    if width <= 0 || height <= 0 {
-        println!("Anime4K skipped: unknown source size");
-        return Ok(());
-    }
-    if !needs_upscaling(width, height, info) {
-        println!("Anime4K skipped: source ({width}x{height}) >= monitor resolution");
-        return Ok(());
-    }
-    let Some(shaders) = find_anime4k_shaders() else {
-        println!("Anime4K skipped: required assets/shaders/anime4k files not found");
-        return Ok(());
-    };
-    let shader_list = shader_path_list(&shaders);
-    player.set_property_str("glsl-shaders", &shader_list)?;
-    println!("Anime4K enabled: Mode B (Fast)");
-    Ok(())
-}
-
-fn needs_upscaling(width: i64, height: i64, info: &platform::MonitorInfo) -> bool {
-    let monitor_width = i64::from(info.bounds.width.cast_signed().max(0));
-    let monitor_height = i64::from(info.bounds.height.cast_signed().max(0));
-    width < monitor_width || height < monitor_height
-}
-
-fn find_anime4k_shaders() -> Option<Vec<PathBuf>> {
-    shader_roots()
-        .map(|root| root.join("anime4k"))
-        .find_map(|root| {
-            let shaders: Vec<_> = ANIME4K_MODE_B_FAST
-                .iter()
-                .map(|name| root.join(name))
-                .collect();
-            shaders.iter().all(|path| path.is_file()).then_some(shaders)
-        })
-}
-
-fn shader_path_list(paths: &[PathBuf]) -> String {
-    let separator = if cfg!(windows) { ";" } else { ":" };
-    paths
-        .iter()
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .collect::<Vec<_>>()
-        .join(separator)
-}
-
-fn find_fsr_shader() -> Option<PathBuf> {
-    shader_roots()
-        .map(|root| root.join("FSR.glsl"))
-        .find(|path| path.is_file())
-}
-
-fn shader_roots() -> impl Iterator<Item = PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        roots.push(dir.join("shaders"));
-    }
-    // Development checkout: workspace assets directory.
-    roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders"));
-    roots.into_iter()
 }
 
 /// Merges stdin commands and Ctrl+C into one control channel.
@@ -698,25 +498,6 @@ fn unquote_path(path: &str) -> &str {
     }
 }
 
-/// Loads libmpv-2.dll: exe directory / system search first, then the
-/// development checkout location filled by scripts/fetch-libmpv.ps1.
-fn load_libmpv() -> anyhow::Result<std::sync::Arc<mpv::Api>> {
-    let primary = mpv::Api::load();
-    if let Ok(api) = primary {
-        return Ok(api);
-    }
-    let dev_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/mpv/unpacked/libmpv-2.dll");
-    if dev_path.exists()
-        && let Ok(api) = mpv::Api::load_from(&dev_path)
-    {
-        return Ok(api);
-    }
-    primary.context(
-        "libmpv-2.dll not found: run scripts/fetch-libmpv.ps1 or place it next to renderer.exe",
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,9 +531,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_ctl_playback_commands() {
+        let cli = Cli::try_parse_from([
+            "renderer",
+            "ctl",
+            "play",
+            "a.mp4",
+            "--monitor",
+            "1",
+            "--quality",
+            "max",
+        ])
+        .unwrap_or_else(|error| panic!("CLI should parse: {error}"));
+        match cli.command {
+            Command::Ctl {
+                command:
+                    DaemonCommand::Play {
+                        monitor, quality, ..
+                    },
+                ..
+            } => {
+                assert_eq!(monitor, 1);
+                assert_eq!(quality, Quality::Max);
+            }
+            _ => panic!("expected ctl play command"),
+        }
+
+        let cli = Cli::try_parse_from(["renderer", "ctl", "volume", "40"])
+            .unwrap_or_else(|error| panic!("CLI should parse: {error}"));
+        match cli.command {
+            Command::Ctl {
+                command: DaemonCommand::Volume { volume, monitor },
+                ..
+            } => {
+                assert_eq!(volume, 40);
+                assert_eq!(monitor, 0);
+            }
+            _ => panic!("expected ctl volume command"),
+        }
+    }
+
+    #[test]
     fn anime4k_bundle_is_complete() {
-        let shaders = find_anime4k_shaders().expect("vendored Anime4K bundle should be present");
-        assert_eq!(shaders.len(), ANIME4K_MODE_B_FAST.len());
+        let shaders =
+            playback::find_anime4k_shaders().expect("vendored Anime4K bundle should be present");
+        assert_eq!(shaders.len(), playback::ANIME4K_MODE_B_FAST.len());
     }
 
     #[test]

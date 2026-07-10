@@ -31,7 +31,16 @@ Phase 1 — *"video and images behind the icons"* — implemented:
 
 Verified live: H.264/HEVC 1080p via d3d11va hardware decoding, `pause` → 0% CPU,
 4K still image → 0% CPU, FSR upscaling auto-enabled for 720p sources and
-auto-skipped at native resolution. Anime4K Mode B Fast also passes an end-to-end
+auto-skipped at native resolution.
+
+Phase 2 (in progress) — renderer daemon with per-monitor sessions over local
+IPC (named pipe / unix socket):
+
+```
+renderer serve
+renderer ctl play video.mp4 --monitor 0 --quality max
+renderer ctl pause | resume | volume 30 | quality eco | stop | status | shutdown
+``` Anime4K Mode B Fast also passes an end-to-end
 shader-loading smoke test on Windows 10 22H2.
 
 Phase 2 foundation has started with a standalone `crates/ipc`: versioned and
