@@ -1,0 +1,113 @@
+//! Platform abstraction for placing wallpaper surfaces behind desktop icons.
+//!
+//! Each OS backend implements [`WallpaperHost`]. The rest of the workspace
+//! must stay platform-agnostic and talk only to this trait.
+
+/// Identifier of a monitor within the current session.
+///
+/// Indices follow the order returned by [`WallpaperHost::enumerate_monitors`]
+/// and are not guaranteed to be stable across display topology changes.
+pub type MonitorId = usize;
+
+/// Rectangle in physical pixels, virtual-desktop coordinates.
+///
+/// The virtual-desktop origin is the top-left corner of the primary monitor,
+/// so `x`/`y` are negative for monitors placed left of / above it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A connected monitor as reported by the OS.
+#[derive(Debug, Clone)]
+pub struct MonitorInfo {
+    pub id: MonitorId,
+    /// Human-readable name (device or model name, backend-dependent).
+    pub name: String,
+    /// Position and resolution in physical pixels, virtual-desktop coordinates.
+    pub bounds: Rect,
+    /// DPI scale factor (1.0 = 96 dpi, 1.5 = 144 dpi, ...).
+    pub scale: f64,
+    pub is_primary: bool,
+}
+
+/// Opaque handle to a wallpaper surface created by a [`WallpaperHost`].
+///
+/// This is a stable key, not the native window value: backends may recreate
+/// the underlying window (e.g. after explorer.exe restarts) without changing
+/// the handle. Phase 1 adds an accessor for the current native window so the
+/// renderer can hand the surface to libmpv via `--wid`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SurfaceHandle(pub(crate) u64);
+
+#[derive(Debug, thiserror::Error)]
+pub enum HostError {
+    #[error("monitor {0} not found")]
+    MonitorNotFound(MonitorId),
+    #[error("surface {0:?} not found")]
+    SurfaceNotFound(SurfaceHandle),
+    #[error("desktop integration failed: {0}")]
+    Desktop(String),
+    #[error("not supported on this platform: {0}")]
+    Unsupported(&'static str),
+}
+
+pub type Result<T> = std::result::Result<T, HostError>;
+
+/// A platform backend that can host wallpaper surfaces behind desktop icons.
+pub trait WallpaperHost {
+    /// Lists connected monitors in backend order (see [`MonitorId`] caveats).
+    fn enumerate_monitors(&self) -> Result<Vec<MonitorInfo>>;
+
+    /// Creates a surface covering the given monitor, placed behind the
+    /// desktop icons. The surface stays alive until destroyed or the host is
+    /// dropped.
+    fn create_surface(&mut self, monitor: MonitorId) -> Result<SurfaceHandle>;
+
+    /// Destroys a surface and restores the desktop area it covered.
+    fn destroy_surface(&mut self, surface: SurfaceHandle) -> Result<()>;
+
+    /// Hides all surfaces without destroying them (content playback is
+    /// paused separately by the renderer).
+    fn pause(&mut self) -> Result<()>;
+
+    /// Undoes [`WallpaperHost::pause`].
+    fn resume(&mut self) -> Result<()>;
+
+    /// Fills a surface with a solid color. Diagnostic path for the phase 0
+    /// `test-surface` command; real content rendering replaces it in phase 1.
+    fn set_surface_color(&mut self, surface: SurfaceHandle, rgb: [u8; 3]) -> Result<()> {
+        let _ = (surface, rgb);
+        Err(HostError::Unsupported("solid-color fill"))
+    }
+
+    /// Current native window value of a surface (`HWND` on Windows), for
+    /// embedding renderers such as libmpv (`wid`).
+    ///
+    /// The value goes stale if the backend has to recreate the window (e.g.
+    /// explorer.exe restart) — callers must re-query after such events.
+    fn surface_native_handle(&self, surface: SurfaceHandle) -> Result<u64> {
+        let _ = surface;
+        Err(HostError::Unsupported("native window handle"))
+    }
+}
+
+#[cfg(windows)]
+mod win32;
+
+/// Creates the backend for the current platform.
+pub fn create_host() -> Result<Box<dyn WallpaperHost>> {
+    #[cfg(windows)]
+    {
+        Ok(Box::new(win32::Win32Host::new()?))
+    }
+    #[cfg(not(windows))]
+    {
+        Err(HostError::Unsupported(
+            "only Windows is targeted in phase 0",
+        ))
+    }
+}

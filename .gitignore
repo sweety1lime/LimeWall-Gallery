@@ -1,0 +1,15 @@
+# Rust
+/target
+
+# Downloaded binaries (see scripts/fetch-libmpv.ps1, docs/third-party.md)
+/third_party
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Local tooling
+.claude/
+CLAUDE.md
