@@ -14,7 +14,9 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // Explicit IPv4: with the default binding Node may listen on ::1 only,
+    // while the tauri CLI polls 127.0.0.1 and waits forever.
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",
