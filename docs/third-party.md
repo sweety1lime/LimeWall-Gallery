@@ -48,6 +48,19 @@
 - **Профиль**: opt-in флаг `--anime4k`; шейдеры включаются только при апскейле и
   заменяют FSR, если одновременно выбран `--quality max`.
 
+## three.js r160 (MIT) — вендоренный вьювер 3D
+
+- **Что**: `three.module.min.js` + `examples/jsm` `GLTFLoader.js` и
+  `BufferGeometryUtils.js` в `assets/web/viewer/`; используются генерируемым
+  `viewer.html` для `type: model3d` (glTF/glb-обои).
+- **Источник**: npm-пакет `three@0.160.0` (unpkg CDN), файлы `build/` и
+  `examples/jsm/`.
+- **Лицензия**: MIT (Copyright 2010-2023 Three.js Authors) — заголовок
+  `@license` в `three.module.min.js`; jsm-файлы покрыты общей MIT-лицензией
+  проекта three.js.
+- **Замечание**: обои неинтерактивны (WorkerW-дети не получают ввод), поэтому
+  OrbitControls не вендорим — модель авто-вращается в render-loop.
+
 ## Rust-зависимости (проверено при добавлении)
 
 | Crate | Лицензия | Назначение |
@@ -59,6 +72,8 @@
 | libloading | ISC | загрузка libmpv-2.dll в рантайме |
 | serde 1.0.228 / serde_json 1.0.150 | MIT OR Apache-2.0 | JSON-протокол IPC |
 | interprocess 2.4.2 | 0BSD OR Apache-2.0 | локальные сокеты: Windows named pipes / Unix sockets |
+| wry 0.55 / webview2-com 0.38 | MIT OR Apache-2.0 | web-обои (WebView2 позади иконок) |
+| raw-window-handle 0.6 | MIT OR Apache-2.0 OR Zlib | HWND-хэндл для wry |
 | tauri 2 / tauri-build 2 | MIT OR Apache-2.0 | каркас UI (apps/ui) |
 | tauri-plugin-dialog 2 / tauri-plugin-opener 2 | MIT OR Apache-2.0 | нативный файловый диалог; открытие ссылок |
 | dirs 6 | MIT OR Apache-2.0 | путь к %APPDATA% (библиотека) |

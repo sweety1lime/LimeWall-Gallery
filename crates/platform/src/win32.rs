@@ -110,7 +110,10 @@ enum Request {
 struct WebCreate {
     monitor_name: String,
     bounds: Rect,
-    url: String,
+    /// Folder served over the internal protocol.
+    root: std::path::PathBuf,
+    /// Entry file name inside `root`.
+    entry: String,
     reply: mpsc::Sender<Result<SurfaceHandle>>,
 }
 
@@ -233,7 +236,8 @@ impl WallpaperHost for Win32Host {
     fn create_web_surface(
         &mut self,
         monitor: crate::MonitorId,
-        url: &str,
+        root: &std::path::Path,
+        entry: &str,
     ) -> Result<SurfaceHandle> {
         let target = enumerate_monitors_impl()?
             .into_iter()
@@ -243,7 +247,8 @@ impl WallpaperHost for Win32Host {
         let boxed = Box::new(WebCreate {
             monitor_name: target.name,
             bounds: target.bounds,
-            url: url.to_owned(),
+            root: root.to_path_buf(),
+            entry: entry.to_owned(),
             reply,
         });
         unsafe {
@@ -307,11 +312,18 @@ struct SurfaceState {
     bounds: Rect,
     color: [u8; 3],
     connected: bool,
-    /// Local `file://` entry for a web surface; `None` for plain surfaces.
-    web_url: Option<String>,
+    /// Content of a web surface (served folder + entry); `None` for plain
+    /// surfaces. Kept so the watchdog can rebuild the webview.
+    web: Option<WebContent>,
     /// Live webview for a web surface. Dropping it tears WebView2 down; it is
     /// rebuilt if the watchdog recreates the window (explorer restart).
     webview: Option<wry::WebView>,
+}
+
+#[derive(Clone)]
+struct WebContent {
+    root: std::path::PathBuf,
+    entry: String,
 }
 
 struct Worker {
@@ -430,7 +442,8 @@ unsafe extern "system" fn control_proc(
                 Some(worker) => worker.create_web_surface(
                     request.monitor_name.clone(),
                     request.bounds,
-                    request.url.clone(),
+                    request.root.clone(),
+                    request.entry.clone(),
                 ),
                 None => Err(no_response()),
             });
@@ -548,7 +561,7 @@ impl Worker {
                 bounds,
                 color: DEFAULT_COLOR,
                 connected: true,
-                web_url: None,
+                web: None,
                 webview: None,
             },
         );
@@ -559,13 +572,14 @@ impl Worker {
         &mut self,
         monitor_name: String,
         bounds: Rect,
-        url: String,
+        root: std::path::PathBuf,
+        entry: String,
     ) -> Result<SurfaceHandle> {
         let parent = self.ensure_parent()?;
         // Build the webview on a top-level window (WebView2 rejects a
         // WorkerW child as parent), then slide it behind the icons.
         let window = create_toplevel_surface_window(bounds)?;
-        let webview = match build_webview(window, &url) {
+        let webview = match build_webview(window, &root, &entry) {
             Ok(webview) => webview,
             Err(error) => {
                 unsafe {
@@ -585,7 +599,7 @@ impl Worker {
                 bounds,
                 color: DEFAULT_COLOR,
                 connected: true,
-                web_url: Some(url),
+                web: Some(WebContent { root, entry }),
                 webview: Some(webview),
             },
         );
@@ -704,10 +718,10 @@ impl Worker {
                 }
             }
             let show = visible && state.connected;
-            if let Some(url) = state.web_url.clone() {
+            if let Some(content) = state.web.clone() {
                 // Web surface: top-level window -> webview -> reparent.
                 if let Ok(window) = create_toplevel_surface_window(state.bounds) {
-                    match build_webview(window, &url) {
+                    match build_webview(window, &content.root, &content.entry) {
                         Ok(webview) => {
                             state.hwnd = window.0 as isize;
                             state.webview = Some(webview);
@@ -867,13 +881,81 @@ impl HasWindowHandle for HostWindow {
     }
 }
 
-/// Builds a WebView2 filling `window`, loading a local `file://` entry.
-fn build_webview(window: HWND, url: &str) -> Result<wry::WebView> {
+/// Builds a WebView2 filling `window` that serves `root` over the internal
+/// `wallpaper://` protocol and loads `entry`. The protocol (not `file://`)
+/// lets pages fetch assets, load ES modules and 3D models.
+fn build_webview(window: HWND, root: &std::path::Path, entry: &str) -> Result<wry::WebView> {
     let host = HostWindow(window);
+    let served_root = root.to_path_buf();
+    let entry = entry.trim_start_matches(['/', '\\']).replace('\\', "/");
     WebViewBuilder::new()
-        .with_url(url)
+        .with_custom_protocol("wallpaper".into(), move |_id, request| {
+            serve_local_asset(&served_root, request.uri().path())
+        })
+        .with_url(format!("wallpaper://localhost/{entry}"))
         .build(&host)
         .map_err(|e| HostError::Desktop(format!("failed to create webview: {e}")))
+}
+
+/// Serves a file from the wallpaper folder for the `wallpaper://` protocol.
+fn serve_local_asset(
+    root: &std::path::Path,
+    uri_path: &str,
+) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    use std::borrow::Cow;
+    use wry::http::{Response, StatusCode, header::CONTENT_TYPE};
+
+    let not_found = || {
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Cow::Owned(Vec::new()))
+            .unwrap()
+    };
+
+    let relative = uri_path.trim_start_matches('/').replace("%20", " ");
+    if relative.contains("..") {
+        return not_found();
+    }
+    let file = root.join(&relative);
+    match std::fs::read(&file) {
+        Ok(bytes) => Response::builder()
+            .header(CONTENT_TYPE, mime_for(&file))
+            .body(Cow::Owned(bytes))
+            .unwrap_or_else(|_| not_found()),
+        Err(_) => {
+            // favicon.ico misses are normal; a missing real asset is worth a line.
+            if relative != "favicon.ico" {
+                eprintln!("web asset not found: {relative}");
+            }
+            not_found()
+        }
+    }
+}
+
+fn mime_for(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("html" | "htm") => "text/html",
+        Some("js" | "mjs") => "text/javascript",
+        Some("css") => "text/css",
+        Some("json") => "application/json",
+        Some("wasm") => "application/wasm",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("gltf") => "model/gltf+json",
+        Some("glb") => "model/gltf-binary",
+        Some("bin") => "application/octet-stream",
+        Some("mp4") => "video/mp4",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
 }
 
 /// A hidden top-level popup sized to `bounds`. WebView2 rejects a

@@ -401,23 +401,24 @@ fn test_surface(monitor: platform::MonitorId, color: Rgb) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Converts a local path to a `file:///C:/...` URL for the webview.
-fn file_url(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    let text = text.strip_prefix("//?/").unwrap_or(&text);
-    format!("file:///{}", text.trim_start_matches('/'))
-}
-
 fn test_web(file: &Path, monitor: platform::MonitorId) -> anyhow::Result<()> {
     let file = file
         .canonicalize()
         .with_context(|| format!("file not found: {}", file.display()))?;
-    let url = file_url(&file);
+    let root = file.parent().context("HTML file has no parent folder")?;
+    let entry = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("bad entry file name")?;
 
     let mut host = platform::create_host().context("failed to initialize wallpaper host")?;
     let info = pick_monitor(host.as_ref(), monitor)?;
-    println!("loading {url} on monitor {}", info.id);
-    let surface = host.create_web_surface(monitor, &url)?;
+    println!(
+        "serving {} (entry {entry}) on monitor {}",
+        root.display(),
+        info.id
+    );
+    let surface = host.create_web_surface(monitor, root, entry)?;
 
     let stop = wait_for_ctrl_c()?;
     println!("web wallpaper is up behind the desktop icons — press Ctrl+C to stop");

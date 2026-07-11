@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>LimeWall 3D</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0d0f0c;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+    <script type="importmap">
+      { "imports": { "three": "./three.module.min.js" } }
+    </script>
+  </head>
+  <body>
+    <script type="module">
+      import * as THREE from "three";
+      import { GLTFLoader } from "./loaders/GLTFLoader.js";
+
+      // The library injects the model file name here.
+      const MODEL = "__MODEL__";
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      document.body.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0d0f0c);
+
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000,
+      );
+
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x334422, 1.1));
+      const key = new THREE.DirectionalLight(0xffffff, 1.6);
+      key.position.set(3, 5, 4);
+      scene.add(key);
+
+      const pivot = new THREE.Group();
+      scene.add(pivot);
+
+      new GLTFLoader().load(
+        MODEL,
+        (gltf) => {
+          const model = gltf.scene;
+          // Center the model and frame it in view.
+          const box = new THREE.Box3().setFromObject(model);
+          const size = box.getSize(new THREE.Vector3());
+          const center = box.getCenter(new THREE.Vector3());
+          model.position.sub(center);
+          pivot.add(model);
+
+          const radius = Math.max(size.x, size.y, size.z) * 0.5 || 1;
+          const distance = radius / Math.tan((camera.fov * Math.PI) / 360);
+          camera.position.set(0, radius * 0.35, distance * 1.6);
+          camera.lookAt(0, 0, 0);
+        },
+        undefined,
+        (error) => console.error("glTF load failed", error),
+      );
+
+      let last = performance.now();
+      function animate(now) {
+        requestAnimationFrame(animate);
+        const dt = (now - last) / 1000;
+        last = now;
+        pivot.rotation.y += dt * 0.3; // slow auto-spin
+        renderer.render(scene, camera);
+      }
+      requestAnimationFrame(animate);
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

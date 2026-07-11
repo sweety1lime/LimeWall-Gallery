@@ -250,13 +250,6 @@ fn is_web_path(path: &std::path::Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
 }
 
-/// Local path -> `file:///C:/...` URL for the webview.
-fn file_url(path: &std::path::Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    let text = text.strip_prefix("//?/").unwrap_or(&text);
-    format!("file:///{}", text.trim_start_matches('/'))
-}
-
 /// System conditions that pause playback regardless of user intent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Politeness {
@@ -724,9 +717,17 @@ impl DaemonState {
 
         let status;
         if is_web_path(&path) {
+            let root = path.parent().ok_or((
+                ipc::ErrorCode::PlaybackFailed,
+                "no folder for web entry".into(),
+            ))?;
+            let entry = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or((ipc::ErrorCode::PlaybackFailed, "bad web entry name".into()))?;
             let surface = self
                 .host
-                .create_web_surface(monitor, &file_url(&path))
+                .create_web_surface(monitor, root, entry)
                 .map_err(|error| (ipc::ErrorCode::PlaybackFailed, error.to_string()))?;
             self.sessions.insert(
                 monitor,

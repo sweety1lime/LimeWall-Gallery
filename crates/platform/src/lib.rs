@@ -67,11 +67,18 @@ pub trait WallpaperHost {
     /// dropped.
     fn create_surface(&mut self, monitor: MonitorId) -> Result<SurfaceHandle>;
 
-    /// Creates a surface hosting a webview that loads `url` (a local
-    /// `file://` entry), placed behind the desktop icons. Used for HTML and
-    /// glTF (three.js) wallpapers (phase 6).
-    fn create_web_surface(&mut self, monitor: MonitorId, url: &str) -> Result<SurfaceHandle> {
-        let _ = (monitor, url);
+    /// Creates a surface hosting a webview that serves `root` over an internal
+    /// protocol and loads `entry` (a file name inside `root`), placed behind
+    /// the desktop icons. Used for HTML and glTF (three.js) wallpapers
+    /// (phase 6). The protocol (not `file://`) lets pages fetch assets and
+    /// load ES modules and 3D models.
+    fn create_web_surface(
+        &mut self,
+        monitor: MonitorId,
+        root: &std::path::Path,
+        entry: &str,
+    ) -> Result<SurfaceHandle> {
+        let _ = (monitor, root, entry);
         Err(HostError::Unsupported("web surface"))
     }
 

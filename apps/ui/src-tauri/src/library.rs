@@ -130,6 +130,18 @@ impl Library {
                     let _ = fs::remove_dir_all(&dir);
                     return Err(format!("package entry {} is missing", manifest.entry));
                 }
+                // A 3D model gets a generated three.js viewer as its entry.
+                let file = if manifest.media_type == wpk::MediaType::Model3d {
+                    match install_3d_viewer(&dir, &manifest.entry) {
+                        Ok(viewer) => viewer,
+                        Err(error) => {
+                            let _ = fs::remove_dir_all(&dir);
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    entry
+                };
                 let preview = manifest
                     .preview
                     .as_ref()
@@ -138,7 +150,7 @@ impl Library {
                 let item = self.web_item(
                     id,
                     manifest.name.clone(),
-                    entry,
+                    file,
                     preview,
                     Some(manifest.author.clone()),
                     Some(manifest.license.clone()),
@@ -418,6 +430,45 @@ impl Library {
         fs::write(&temporary, json).map_err(|error| error.to_string())?;
         fs::rename(&temporary, self.index_path()).map_err(|error| error.to_string())
     }
+}
+
+/// Installs the bundled three.js viewer into a model3d package folder and
+/// writes a `viewer.html` that loads `model`. Returns the viewer path.
+fn install_3d_viewer(dir: &Path, model: &str) -> Result<PathBuf, String> {
+    let assets = viewer_assets_dir()
+        .ok_or("three.js viewer assets not found (run scripts/build-portable.ps1 or use dev)")?;
+    for rel in [
+        "three.module.min.js",
+        "loaders/GLTFLoader.js",
+        "utils/BufferGeometryUtils.js",
+    ] {
+        let dest = dir.join(rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::copy(assets.join(rel), &dest).map_err(|e| format!("copy {rel}: {e}"))?;
+    }
+    let template = include_str!("../../../../assets/web/viewer/viewer.template.html");
+    // Model names pass wpk's ensure_safe_name, so a plain substitution is safe.
+    let html = template.replace("__MODEL__", model);
+    let viewer = dir.join("viewer.html");
+    fs::write(&viewer, html).map_err(|e| e.to_string())?;
+    Ok(viewer)
+}
+
+/// Locates the bundled three.js viewer assets: next to the executable
+/// (portable/installed) or in the dev workspace.
+fn viewer_assets_dir() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("web").join("viewer"));
+    }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../assets/web/viewer"));
+    candidates
+        .into_iter()
+        .find(|p| p.join("three.module.min.js").is_file())
 }
 
 /// Caps for packaging or copying a web wallpaper folder.
@@ -730,6 +781,46 @@ mod tests {
         fs::write(&odd, "hello").expect("write");
         let error = library.import(&odd).expect_err("txt must be rejected");
         assert!(error.contains("unsupported media type"));
+    }
+
+    #[test]
+    fn model3d_import_installs_the_three_js_viewer() {
+        if viewer_assets_dir().is_none() {
+            eprintln!("skipped: three.js viewer assets not present");
+            return;
+        }
+        let temp = tempfile::tempdir().expect("temp dir");
+        let library = Library::at(temp.path().join("library"));
+
+        // A model3d package: a .glb entry.
+        let model = temp.path().join("Box.glb");
+        fs::write(&model, b"glTF\x02\x00\x00\x00stub").expect("model");
+        let mut manifest = wpk::Manifest {
+            id: "boxmodel".into(),
+            media_type: wpk::MediaType::Model3d,
+            entry: "Box.glb".into(),
+            name: "Box".into(),
+            author: "khronos".into(),
+            license: "CC-BY".into(),
+            version: "1.0".into(),
+            preview: None,
+            options: Default::default(),
+        };
+        let package = temp.path().join("box.wpk");
+        wpk::write_package(&package, &manifest, &[("Box.glb", model.as_path())]).expect("pack");
+        manifest.entry = "Box.glb".into();
+
+        let item = library.import(&package).expect("model3d import");
+        assert_eq!(item.kind, MediaKind::Web);
+        // The entry became the generated viewer, not the raw model.
+        assert!(item.file.ends_with("viewer.html"));
+        let dir = item.file.parent().unwrap();
+        assert!(dir.join("Box.glb").is_file(), "model kept");
+        assert!(dir.join("three.module.min.js").is_file(), "three.js installed");
+        assert!(dir.join("loaders/GLTFLoader.js").is_file(), "loader installed");
+        let viewer = fs::read_to_string(&item.file).expect("viewer");
+        assert!(viewer.contains("Box.glb"), "viewer references the model");
+        assert!(!viewer.contains("__MODEL__"), "placeholder replaced");
     }
 
     #[test]
