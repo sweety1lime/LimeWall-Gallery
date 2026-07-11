@@ -57,6 +57,19 @@ line as above. The first `tauri dev` compiles the whole Tauri stack and can
 take several minutes before the window appears; with a fullscreen app in the
 foreground the window may open behind it (check the taskbar).
 
+`tauri dev` serves the window from a local dev server, so it cannot test the
+real desktop lifecycle (closing the window, reopening from the tray,
+autostart, reboot). For that, build the portable folder — every binary side
+by side, `LimeWall.exe` runs standalone:
+
+```
+scripts\fetch-libmpv.ps1
+scripts\fetch-ffmpeg.ps1
+scripts\build-portable.ps1
+```
+
+The result lands in `dist/LimeWall/`; run `dist\LimeWall\LimeWall.exe`.
+
 The daemon owns a tray icon (pause all / resume all / open UI / quit),
 persists applied wallpapers and restores them on start; autostart with
 Windows is a checkbox in the UI (or `renderer ctl autostart on|off`).

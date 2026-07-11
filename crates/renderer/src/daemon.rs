@@ -882,10 +882,19 @@ fn spawn_ui() -> Result<(), String> {
         .into_iter()
         .find(|path| path.is_file())
         .ok_or("UI executable not found (set LIMEWALL_UI)")?;
-    std::process::Command::new(&ui)
+    let mut command = std::process::Command::new(&ui);
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // No console flash if the UI happens to be a console-subsystem build.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
         .spawn()
         .map(drop)
         .map_err(|error| format!("failed to start {}: {error}", ui.display()))
