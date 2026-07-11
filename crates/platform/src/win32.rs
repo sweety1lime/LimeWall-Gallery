@@ -18,6 +18,7 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, EnumDisplayMonitors, FillRect,
     GetMonitorInfoW, HDC, HMONITOR, InvalidateRect, MONITORINFOEXW, MapWindowPoints, PAINTSTRUCT,
 };
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
@@ -25,15 +26,21 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    EnumWindows, FindWindowExW, FindWindowW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW,
-    HWND_MESSAGE, IsWindow, KillTimer, MONITORINFOF_PRIMARY, MSG, PostQuitMessage, RegisterClassW,
-    SMTO_NORMAL, SPI_GETDESKWALLPAPER, SPI_SETDESKWALLPAPER, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
-    SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SendMessageTimeoutW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_DESTROY, WM_ERASEBKGND,
-    WM_PAINT, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE,
+    EnumWindows, FindWindowExW, FindWindowW, GWL_STYLE, GWLP_HINSTANCE, GWLP_USERDATA, GetMessageW,
+    GetWindowLongPtrW, HWND_MESSAGE, IsWindow, KillTimer, MONITORINFOF_PRIMARY, MSG, PostMessageW,
+    PostQuitMessage, RegisterClassW, SMTO_NORMAL, SPI_GETDESKWALLPAPER, SPI_SETDESKWALLPAPER,
+    SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOZORDER,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageTimeoutW, SendMessageW, SetParent, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_DESTROY, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_CHILD,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{BOOL, w};
+
+use raw_window_handle::{
+    HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
+};
+use wry::WebViewBuilder;
 
 use crate::{HostError, MonitorInfo, Rect, Result, SurfaceHandle, WallpaperHost};
 
@@ -41,6 +48,10 @@ use crate::{HostError, MonitorInfo, Rect, Result, SurfaceHandle, WallpaperHost};
 /// desktop icons (part of the wallpaper-transition machinery; idempotent).
 const WM_SPAWN_WORKERW: u32 = 0x052C;
 const WM_APP_REQUEST: u32 = WM_APP + 1;
+/// Web-surface creation goes through PostMessage, not the SendMessageW request
+/// path: building a WebView2 runs a nested message pump, which fails while the
+/// host thread sits in the in-send-message state of a cross-thread send.
+const WM_APP_CREATE_WEB: u32 = WM_APP + 2;
 const WATCHDOG_TIMER_ID: usize = 1;
 const WATCHDOG_INTERVAL_MS: u32 = 1000;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -86,7 +97,21 @@ enum Request {
         surface: SurfaceHandle,
         result: Result<u64>,
     },
+    SetSuspended {
+        surface: SurfaceHandle,
+        suspended: bool,
+        result: Result<()>,
+    },
     Shutdown,
+}
+
+/// Marshalled to the host thread with PostMessage (see [`WM_APP_CREATE_WEB`]).
+/// Boxed and reclaimed by the handler; the result comes back on `reply`.
+struct WebCreate {
+    monitor_name: String,
+    bounds: Rect,
+    url: String,
+    reply: mpsc::Sender<Result<SurfaceHandle>>,
 }
 
 fn no_response() -> HostError {
@@ -204,6 +229,47 @@ impl WallpaperHost for Win32Host {
             _ => Err(no_response()),
         }
     }
+
+    fn create_web_surface(
+        &mut self,
+        monitor: crate::MonitorId,
+        url: &str,
+    ) -> Result<SurfaceHandle> {
+        let target = enumerate_monitors_impl()?
+            .into_iter()
+            .find(|m| m.id == monitor)
+            .ok_or(HostError::MonitorNotFound(monitor))?;
+        let (reply, rx) = mpsc::channel();
+        let boxed = Box::new(WebCreate {
+            monitor_name: target.name,
+            bounds: target.bounds,
+            url: url.to_owned(),
+            reply,
+        });
+        unsafe {
+            PostMessageW(
+                Some(hwnd(self.control)),
+                WM_APP_CREATE_WEB,
+                WPARAM(0),
+                LPARAM(Box::into_raw(boxed) as isize),
+            )
+            .map_err(|e| desktop_err("failed to post web-surface request", e))?;
+        }
+        rx.recv().map_err(|_| no_response())?
+    }
+
+    fn set_web_suspended(&mut self, surface: SurfaceHandle, suspended: bool) -> Result<()> {
+        let mut request = Request::SetSuspended {
+            surface,
+            suspended,
+            result: Err(no_response()),
+        };
+        self.request(&mut request);
+        match request {
+            Request::SetSuspended { result, .. } => result,
+            _ => Err(no_response()),
+        }
+    }
 }
 
 impl Win32Host {
@@ -241,6 +307,11 @@ struct SurfaceState {
     bounds: Rect,
     color: [u8; 3],
     connected: bool,
+    /// Local `file://` entry for a web surface; `None` for plain surfaces.
+    web_url: Option<String>,
+    /// Live webview for a web surface. Dropping it tears WebView2 down; it is
+    /// rebuilt if the watchdog recreates the window (explorer restart).
+    webview: Option<wry::WebView>,
 }
 
 struct Worker {
@@ -257,6 +328,12 @@ thread_local! {
 }
 
 fn worker_main(ready: &mpsc::Sender<std::result::Result<isize, HostError>>) {
+    // WebView2 (web surfaces) requires the thread to be a single-threaded COM
+    // apartment; harmless for the plain surface path. S_FALSE (already
+    // initialized) is fine.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
     let control = match init_worker() {
         Ok(control) => control,
         Err(error) => {
@@ -346,6 +423,20 @@ unsafe extern "system" fn control_proc(
             handle_request(request);
             LRESULT(0)
         }
+        WM_APP_CREATE_WEB => {
+            // Posted (not sent): safe to run WebView2's nested pump here.
+            let request = unsafe { Box::from_raw(lparam.0 as *mut WebCreate) };
+            let result = WORKER.with_borrow_mut(|slot| match slot.as_mut() {
+                Some(worker) => worker.create_web_surface(
+                    request.monitor_name.clone(),
+                    request.bounds,
+                    request.url.clone(),
+                ),
+                None => Err(no_response()),
+            });
+            let _ = request.reply.send(result);
+            LRESULT(0)
+        }
         WM_TIMER if wparam.0 == WATCHDOG_TIMER_ID => {
             watchdog_tick();
             LRESULT(0)
@@ -402,6 +493,11 @@ fn handle_request(request: &mut Request) {
             Request::NativeHandle { surface, result } => {
                 *result = worker.native_handle(*surface);
             }
+            Request::SetSuspended {
+                surface,
+                suspended,
+                result,
+            } => *result = worker.set_suspended(*surface, *suspended),
             Request::Shutdown => {
                 worker.shutdown();
                 *slot = None;
@@ -452,16 +548,73 @@ impl Worker {
                 bounds,
                 color: DEFAULT_COLOR,
                 connected: true,
+                web_url: None,
+                webview: None,
             },
         );
         Ok(SurfaceHandle(id))
     }
 
-    fn destroy_surface(&mut self, surface: SurfaceHandle) -> Result<()> {
+    fn create_web_surface(
+        &mut self,
+        monitor_name: String,
+        bounds: Rect,
+        url: String,
+    ) -> Result<SurfaceHandle> {
+        let parent = self.ensure_parent()?;
+        // Build the webview on a top-level window (WebView2 rejects a
+        // WorkerW child as parent), then slide it behind the icons.
+        let window = create_toplevel_surface_window(bounds)?;
+        let webview = match build_webview(window, &url) {
+            Ok(webview) => webview,
+            Err(error) => {
+                unsafe {
+                    let _ = DestroyWindow(window);
+                }
+                return Err(error);
+            }
+        };
+        attach_surface_to_parent(window, parent, bounds, self.visible)?;
+        let id = self.next_id;
+        self.next_id += 1;
+        self.surfaces.insert(
+            id,
+            SurfaceState {
+                hwnd: window.0 as isize,
+                monitor_name,
+                bounds,
+                color: DEFAULT_COLOR,
+                connected: true,
+                web_url: Some(url),
+                webview: Some(webview),
+            },
+        );
+        Ok(SurfaceHandle(id))
+    }
+
+    fn set_suspended(&mut self, surface: SurfaceHandle, suspended: bool) -> Result<()> {
         let state = self
+            .surfaces
+            .get(&surface.0)
+            .ok_or(HostError::SurfaceNotFound(surface))?;
+        let Some(webview) = state.webview.as_ref() else {
+            return Ok(()); // plain surface: pause handled by the renderer
+        };
+        // Hiding the WebView2 throttles the page's animation callbacks toward
+        // ~0% CPU; a true TrySuspend can replace this once wry exposes it.
+        webview
+            .set_visible(!suspended)
+            .map_err(|e| HostError::Desktop(format!("webview visibility failed: {e}")))?;
+        Ok(())
+    }
+
+    fn destroy_surface(&mut self, surface: SurfaceHandle) -> Result<()> {
+        let mut state = self
             .surfaces
             .remove(&surface.0)
             .ok_or(HostError::SurfaceNotFound(surface))?;
+        // Drop the webview before its host window.
+        state.webview = None;
         unsafe {
             if IsWindow(Some(hwnd(state.hwnd))).as_bool() {
                 let _ = DestroyWindow(hwnd(state.hwnd));
@@ -543,17 +696,31 @@ impl Worker {
                     state.connected = false;
                 }
             }
+            // Drop the old webview before its window goes away.
+            state.webview = None;
             unsafe {
                 if IsWindow(Some(hwnd(state.hwnd))).as_bool() {
                     let _ = DestroyWindow(hwnd(state.hwnd));
                 }
             }
-            if let Ok(window) = create_surface_window(
-                parent,
-                state.bounds,
-                state.color,
-                visible && state.connected,
-            ) {
+            let show = visible && state.connected;
+            if let Some(url) = state.web_url.clone() {
+                // Web surface: top-level window -> webview -> reparent.
+                if let Ok(window) = create_toplevel_surface_window(state.bounds) {
+                    match build_webview(window, &url) {
+                        Ok(webview) => {
+                            state.hwnd = window.0 as isize;
+                            state.webview = Some(webview);
+                            let _ = attach_surface_to_parent(window, parent, state.bounds, show);
+                        }
+                        Err(_) => unsafe {
+                            let _ = DestroyWindow(window);
+                        },
+                    }
+                }
+            } else if let Ok(window) =
+                create_surface_window(parent, state.bounds, state.color, show)
+            {
                 state.hwnd = window.0 as isize;
             }
         }
@@ -682,6 +849,81 @@ fn find_workerw_sibling() -> Option<HWND> {
 // ---------------------------------------------------------------------------
 // Surface window
 // ---------------------------------------------------------------------------
+
+/// Minimal `HasWindowHandle` wrapper around a raw HWND so wry can host a
+/// WebView2 inside a window we manage.
+struct HostWindow(HWND);
+
+impl HasWindowHandle for HostWindow {
+    fn window_handle(&self) -> std::result::Result<WindowHandle<'_>, HandleError> {
+        let value =
+            std::num::NonZeroIsize::new(self.0.0 as isize).ok_or(HandleError::Unavailable)?;
+        let mut handle = Win32WindowHandle::new(value);
+        // WebView2 wants the owning module instance on the handle.
+        let hinstance = unsafe { GetWindowLongPtrW(self.0, GWLP_HINSTANCE) };
+        handle.hinstance = std::num::NonZeroIsize::new(hinstance);
+        // SAFETY: the HWND is owned by the SurfaceState and outlives the webview.
+        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
+    }
+}
+
+/// Builds a WebView2 filling `window`, loading a local `file://` entry.
+fn build_webview(window: HWND, url: &str) -> Result<wry::WebView> {
+    let host = HostWindow(window);
+    WebViewBuilder::new()
+        .with_url(url)
+        .build(&host)
+        .map_err(|e| HostError::Desktop(format!("failed to create webview: {e}")))
+}
+
+/// A hidden top-level popup sized to `bounds`. WebView2 rejects a
+/// WS_CHILD-of-WorkerW parent at creation time, so a web surface starts as a
+/// normal window and is reparented under WorkerW afterwards.
+fn create_toplevel_surface_window(bounds: Rect) -> Result<HWND> {
+    let instance =
+        unsafe { GetModuleHandleW(None) }.map_err(|e| desktop_err("GetModuleHandleW failed", e))?;
+    unsafe {
+        CreateWindowExW(
+            WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            SURFACE_CLASS,
+            w!("LimeWall surface"),
+            WS_POPUP,
+            bounds.x,
+            bounds.y,
+            bounds.width as i32,
+            bounds.height as i32,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        )
+    }
+    .map_err(|e| desktop_err("failed to create web surface window", e))
+}
+
+/// Reparents a top-level surface window under WorkerW as a WS_CHILD.
+fn attach_surface_to_parent(window: HWND, parent: HWND, bounds: Rect, visible: bool) -> Result<()> {
+    unsafe {
+        let style = GetWindowLongPtrW(window, GWL_STYLE);
+        let child_style = (style & !(WS_POPUP.0 as isize)) | (WS_CHILD.0 as isize);
+        SetWindowLongPtrW(window, GWL_STYLE, child_style);
+        SetParent(window, Some(parent)).map_err(|e| desktop_err("SetParent failed", e))?;
+        let point = surface_origin_in_parent(parent, bounds);
+        let _ = SetWindowPos(
+            window,
+            None,
+            point.x,
+            point.y,
+            bounds.width as i32,
+            bounds.height as i32,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+        if visible {
+            let _ = ShowWindow(window, SW_SHOWNA);
+        }
+    }
+    Ok(())
+}
 
 fn create_surface_window(
     parent: HWND,

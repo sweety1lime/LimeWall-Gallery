@@ -67,6 +67,21 @@ pub trait WallpaperHost {
     /// dropped.
     fn create_surface(&mut self, monitor: MonitorId) -> Result<SurfaceHandle>;
 
+    /// Creates a surface hosting a webview that loads `url` (a local
+    /// `file://` entry), placed behind the desktop icons. Used for HTML and
+    /// glTF (three.js) wallpapers (phase 6).
+    fn create_web_surface(&mut self, monitor: MonitorId, url: &str) -> Result<SurfaceHandle> {
+        let _ = (monitor, url);
+        Err(HostError::Unsupported("web surface"))
+    }
+
+    /// Suspends or resumes a web surface (WebView2 TrySuspend): a paused web
+    /// wallpaper must drop to ~0% CPU. No-op for plain surfaces.
+    fn set_web_suspended(&mut self, surface: SurfaceHandle, suspended: bool) -> Result<()> {
+        let _ = (surface, suspended);
+        Err(HostError::Unsupported("web suspend"))
+    }
+
     /// Destroys a surface and restores the desktop area it covered.
     fn destroy_surface(&mut self, surface: SurfaceHandle) -> Result<()>;
 

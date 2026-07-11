@@ -44,6 +44,14 @@ enum Command {
         #[arg(long)]
         anime4k: bool,
     },
+    /// Show a local HTML file as a web wallpaper behind the icons (phase 6).
+    TestWeb {
+        /// Path to the HTML entry file.
+        file: PathBuf,
+        /// Monitor index as listed by the platform backend.
+        #[arg(long, default_value_t = 0)]
+        monitor: platform::MonitorId,
+    },
     /// Run the long-lived local IPC daemon (phase 2).
     Serve {
         /// Override the per-user local socket name (primarily for tests).
@@ -185,6 +193,7 @@ fn main() -> anyhow::Result<()> {
             volume,
             anime4k,
         } => play(&file, monitor, quality, volume, anime4k),
+        Command::TestWeb { file, monitor } => test_web(&file, monitor),
         Command::Serve { endpoint, state } => daemon::run(endpoint.as_deref(), state.as_deref()),
         Command::Ctl { endpoint, command } => ctl(endpoint.as_deref(), command),
     }
@@ -383,6 +392,35 @@ fn test_surface(monitor: platform::MonitorId, color: Rgb) -> anyhow::Result<()> 
 
     let stop = wait_for_ctrl_c()?;
     println!("test surface is up behind the desktop icons — press Ctrl+C to stop");
+    let _ = stop.recv();
+
+    println!("restoring desktop...");
+    host.destroy_surface(surface)?;
+    drop(host);
+    println!("desktop restored");
+    Ok(())
+}
+
+/// Converts a local path to a `file:///C:/...` URL for the webview.
+fn file_url(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let text = text.strip_prefix("//?/").unwrap_or(&text);
+    format!("file:///{}", text.trim_start_matches('/'))
+}
+
+fn test_web(file: &Path, monitor: platform::MonitorId) -> anyhow::Result<()> {
+    let file = file
+        .canonicalize()
+        .with_context(|| format!("file not found: {}", file.display()))?;
+    let url = file_url(&file);
+
+    let mut host = platform::create_host().context("failed to initialize wallpaper host")?;
+    let info = pick_monitor(host.as_ref(), monitor)?;
+    println!("loading {url} on monitor {}", info.id);
+    let surface = host.create_web_surface(monitor, &url)?;
+
+    let stop = wait_for_ctrl_c()?;
+    println!("web wallpaper is up behind the desktop icons — press Ctrl+C to stop");
     let _ = stop.recv();
 
     println!("restoring desktop...");

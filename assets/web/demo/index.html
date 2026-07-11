@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>LimeWall demo</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0f1210;
+      }
+      /* Cheap CSS-only animation: a slow lime aurora. No JS render loop, so a
+         hidden webview drops to ~0% CPU on its own. */
+      .aurora {
+        position: absolute;
+        inset: -20%;
+        background:
+          radial-gradient(40% 50% at 30% 30%, rgba(125, 191, 106, 0.55), transparent 70%),
+          radial-gradient(45% 55% at 70% 60%, rgba(74, 141, 58, 0.5), transparent 70%),
+          radial-gradient(35% 45% at 50% 80%, rgba(160, 220, 120, 0.4), transparent 70%);
+        filter: blur(40px);
+        animation: drift 24s ease-in-out infinite alternate;
+      }
+      @keyframes drift {
+        from {
+          transform: translate(-4%, -3%) scale(1.05) rotate(0deg);
+        }
+        to {
+          transform: translate(4%, 3%) scale(1.15) rotate(8deg);
+        }
+      }
+      .label {
+        position: absolute;
+        left: 6%;
+        bottom: 8%;
+        font: 600 clamp(24px, 5vw, 64px) "Segoe UI", sans-serif;
+        color: rgba(234, 255, 224, 0.9);
+        letter-spacing: 0.04em;
+      }
+      .label span {
+        color: #7dbf6a;
+        font-weight: 400;
+        font-size: 0.5em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="aurora"></div>
+    <div class="label">LimeWall <span>by 2fame</span></div>
+  </body>
+</html>
