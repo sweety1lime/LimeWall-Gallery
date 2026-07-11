@@ -240,6 +240,26 @@ struct Politeness {
     on_battery: bool,
 }
 
+impl Politeness {
+    /// System-wide reasons to pause, independent of any single monitor.
+    fn global_pause(&self, battery_policy: ipc::BatteryPolicy) -> bool {
+        self.session_locked
+            || self.display_off
+            || (self.on_battery && battery_policy == ipc::BatteryPolicy::Pause)
+    }
+
+    /// Whether sessions should run in the temporary battery Eco profile.
+    fn wants_eco(&self, battery_policy: ipc::BatteryPolicy) -> bool {
+        self.on_battery && battery_policy == ipc::BatteryPolicy::Eco
+    }
+}
+
+/// Effective pause for one monitor: the user's own pause, a fullscreen app on
+/// that monitor, or any system-wide reason. Pure so it can be tested directly.
+fn desired_pause(user_paused: bool, fullscreen: bool, global_pause: bool) -> bool {
+    user_paused || fullscreen || global_pause
+}
+
 struct DaemonState {
     host: Box<dyn platform::WallpaperHost>,
     /// Loaded lazily on the first play request.
@@ -406,13 +426,10 @@ impl DaemonState {
     /// Reconciles every player's pause/quality with user intent and the
     /// current system conditions.
     fn apply_politeness(&mut self) {
-        let battery_pause =
-            self.politeness.on_battery && self.battery_policy == ipc::BatteryPolicy::Pause;
-        let global_pause =
-            self.politeness.session_locked || self.politeness.display_off || battery_pause;
+        let global_pause = self.politeness.global_pause(self.battery_policy);
         for session in self.sessions.values_mut() {
             let fullscreen = self.fullscreen_monitors.contains(&session.monitor.name);
-            let desired = session.user_paused || global_pause || fullscreen;
+            let desired = desired_pause(session.user_paused, fullscreen, global_pause);
             if desired != session.effective_paused {
                 match session.player.set_property_bool("pause", desired) {
                     Ok(()) => {
@@ -434,7 +451,7 @@ impl DaemonState {
 
         // Battery Eco: a temporary downgrade, session.quality keeps the
         // user's choice for persistence and for the way back.
-        let want_eco = self.politeness.on_battery && self.battery_policy == ipc::BatteryPolicy::Eco;
+        let want_eco = self.politeness.wants_eco(self.battery_policy);
         if want_eco != self.battery_eco_active {
             for session in self.sessions.values() {
                 let (quality, anime4k) = if want_eco {
@@ -990,5 +1007,66 @@ mod tests {
         let json = format!(r#"{{"version":{STATE_VERSION},"wallpapers":[]}}"#);
         let back: PersistedState = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.on_battery, ipc::BatteryPolicy::Pause);
+    }
+
+    fn politeness(locked: bool, display_off: bool, on_battery: bool) -> Politeness {
+        Politeness {
+            session_locked: locked,
+            display_off,
+            on_battery,
+        }
+    }
+
+    #[test]
+    fn nothing_pauses_when_idle_and_unpaused() {
+        let calm = politeness(false, false, false);
+        assert!(!calm.global_pause(ipc::BatteryPolicy::Pause));
+        assert!(!desired_pause(false, false, false));
+    }
+
+    #[test]
+    fn user_pause_and_fullscreen_pause_a_single_monitor() {
+        // No system-wide reason, but the user paused this monitor.
+        assert!(desired_pause(true, false, false));
+        // A fullscreen app on this monitor pauses only it.
+        assert!(desired_pause(false, true, false));
+    }
+
+    #[test]
+    fn lock_and_dark_display_pause_regardless_of_policy() {
+        for policy in [
+            ipc::BatteryPolicy::Pause,
+            ipc::BatteryPolicy::Eco,
+            ipc::BatteryPolicy::Keep,
+        ] {
+            assert!(
+                politeness(true, false, false).global_pause(policy),
+                "lock, {policy:?}"
+            );
+            assert!(
+                politeness(false, true, false).global_pause(policy),
+                "dark, {policy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn battery_policy_controls_the_battery_pause() {
+        let on_battery = politeness(false, false, true);
+        assert!(on_battery.global_pause(ipc::BatteryPolicy::Pause));
+        assert!(!on_battery.global_pause(ipc::BatteryPolicy::Eco));
+        assert!(!on_battery.global_pause(ipc::BatteryPolicy::Keep));
+        // Eco is a downgrade, not a pause.
+        assert!(on_battery.wants_eco(ipc::BatteryPolicy::Eco));
+        assert!(!on_battery.wants_eco(ipc::BatteryPolicy::Pause));
+        assert!(!politeness(false, false, false).wants_eco(ipc::BatteryPolicy::Eco));
+    }
+
+    #[test]
+    fn resume_stays_paused_while_a_condition_holds() {
+        // The user resumed (user_paused = false) but a fullscreen game runs:
+        // the monitor must remain paused until the game ends.
+        let global = politeness(false, false, false).global_pause(ipc::BatteryPolicy::Pause);
+        assert!(desired_pause(false, true, global));
     }
 }
