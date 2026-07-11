@@ -38,6 +38,8 @@ Copy-Item $libmpv $out -Force
 Copy-Item $ffmpeg $out -Force
 Copy-Item (Join-Path $repoRoot "assets\shaders\FSR.glsl") (Join-Path $out "shaders") -Force
 Copy-Item (Join-Path $repoRoot "assets\shaders\anime4k\*.glsl") (Join-Path $out "shaders\anime4k") -Force
+# Sample web wallpaper for testing.
+Copy-Item (Join-Path $repoRoot "assets\web") (Join-Path $out "web") -Recurse -Force
 
 Write-Host ""
 Write-Host "portable build ready: $out"
