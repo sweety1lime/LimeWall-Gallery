@@ -215,21 +215,46 @@ fn handle_connection(mut stream: ipc::LocalStream, requests: &mpsc::Sender<Messa
 /// Command outcome: response data or an error code with a message.
 type CmdResult = Result<ipc::ResponseData, (ipc::ErrorCode, String)>;
 
+/// What is drawing into a session's surface.
+enum SessionKind {
+    /// libmpv video/image/GIF. `width`/`height` are the source size, for
+    /// shader decisions on quality switches.
+    Mpv {
+        player: mpv::Player,
+        width: i64,
+        height: i64,
+    },
+    /// A WebView2 page (HTML / three.js). Lives in the platform host, keyed by
+    /// the surface; pause is a webview suspend, not an mpv property.
+    Web,
+}
+
 struct Session {
     surface: platform::SurfaceHandle,
-    player: mpv::Player,
+    kind: SessionKind,
     path: PathBuf,
     quality: ipc::Quality,
     volume: u8,
     anime4k: bool,
     /// Pause requested by the user; persisted.
     user_paused: bool,
-    /// Pause currently applied to the player (user intent or politeness).
+    /// Pause currently applied (user intent or politeness).
     effective_paused: bool,
-    /// Source size probed at load, for shader decisions on quality switches.
-    width: i64,
-    height: i64,
     monitor: platform::MonitorInfo,
+}
+
+/// Media whose entry file ends in one of these is played as a web surface.
+fn is_web_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
+}
+
+/// Local path -> `file:///C:/...` URL for the webview.
+fn file_url(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let text = text.strip_prefix("//?/").unwrap_or(&text);
+    format!("file:///{}", text.trim_start_matches('/'))
 }
 
 /// System conditions that pause playback regardless of user intent.
@@ -423,48 +448,77 @@ impl DaemonState {
         self.apply_politeness();
     }
 
-    /// Reconciles every player's pause/quality with user intent and the
+    /// Reconciles every session's pause/quality with user intent and the
     /// current system conditions.
     fn apply_politeness(&mut self) {
         let global_pause = self.politeness.global_pause(self.battery_policy);
+        // Web suspends need &self.host, which conflicts with iterating
+        // sessions mutably — collect them and apply after the loop.
+        let mut web_toggles: Vec<(platform::SurfaceHandle, bool, usize)> = Vec::new();
         for session in self.sessions.values_mut() {
             let fullscreen = self.fullscreen_monitors.contains(&session.monitor.name);
             let desired = desired_pause(session.user_paused, fullscreen, global_pause);
-            if desired != session.effective_paused {
-                match session.player.set_property_bool("pause", desired) {
+            if desired == session.effective_paused {
+                continue;
+            }
+            let reason = pause_reason(session.user_paused, global_pause, fullscreen);
+            match &session.kind {
+                SessionKind::Mpv { player, .. } => match player.set_property_bool("pause", desired)
+                {
                     Ok(()) => {
                         session.effective_paused = desired;
                         println!(
-                            "monitor {}: {} ({})",
+                            "monitor {}: {} ({reason})",
                             session.monitor.id,
                             if desired { "paused" } else { "resumed" },
-                            pause_reason(session.user_paused, global_pause, fullscreen)
                         );
                     }
                     Err(error) => eprintln!(
                         "failed to toggle pause on monitor {}: {error}",
                         session.monitor.id
                     ),
+                },
+                SessionKind::Web => {
+                    session.effective_paused = desired;
+                    web_toggles.push((session.surface, desired, session.monitor.id));
                 }
             }
         }
+        for (surface, suspended, monitor) in web_toggles {
+            if let Err(error) = self.host.set_web_suspended(surface, suspended) {
+                eprintln!("failed to suspend web surface on monitor {monitor}: {error}");
+            } else {
+                println!(
+                    "monitor {monitor}: web {}",
+                    if suspended { "suspended" } else { "resumed" }
+                );
+            }
+        }
 
-        // Battery Eco: a temporary downgrade, session.quality keeps the
-        // user's choice for persistence and for the way back.
+        // Battery Eco: a temporary downgrade for mpv sessions; web pages are
+        // unaffected. session.quality keeps the user's choice for the way back.
         let want_eco = self.politeness.wants_eco(self.battery_policy);
         if want_eco != self.battery_eco_active {
             for session in self.sessions.values() {
+                let SessionKind::Mpv {
+                    player,
+                    width,
+                    height,
+                } = &session.kind
+                else {
+                    continue;
+                };
                 let (quality, anime4k) = if want_eco {
                     (playback::Quality::Eco, false)
                 } else {
                     (session.quality.into(), session.anime4k)
                 };
                 if let Err(error) = playback::set_quality(
-                    &session.player,
+                    player,
                     quality,
                     anime4k,
-                    session.width,
-                    session.height,
+                    *width,
+                    *height,
                     &session.monitor,
                 ) {
                     eprintln!(
@@ -662,72 +716,113 @@ impl DaemonState {
                 ipc::ErrorCode::MonitorNotFound,
                 format!("monitor {monitor} not found"),
             ))?;
-        let api = match &self.api {
-            Some(api) => Arc::clone(api),
-            None => {
-                let api = playback::load_libmpv()
-                    .map_err(|error| (ipc::ErrorCode::Internal, format!("{error:#}")))?;
-                self.api = Some(Arc::clone(&api));
-                api
-            }
-        };
+        // Content replacement tears the old session down first; a web and an
+        // mpv surface are not interchangeable, so we always recreate.
+        if let Some(previous) = self.sessions.remove(&monitor) {
+            self.drop_session(previous);
+        }
 
-        // Replacing content on a monitor reuses its surface: the old player
-        // must go first (it renders into that window), then the new one binds.
-        let surface = match self.sessions.remove(&monitor) {
-            Some(previous) => {
-                drop(previous.player);
-                previous.surface
-            }
-            None => self.host.create_surface(monitor).map_err(internal)?,
-        };
-        let wid = match self.host.surface_native_handle(surface) {
-            Ok(wid) => wid,
-            Err(error) => {
-                let _ = self.host.destroy_surface(surface);
-                return Err(internal(error));
-            }
-        };
-        let started =
-            match playback::start_player(api, wid, &path, quality.into(), volume, anime4k, &info) {
+        let status;
+        if is_web_path(&path) {
+            let surface = self
+                .host
+                .create_web_surface(monitor, &file_url(&path))
+                .map_err(|error| (ipc::ErrorCode::PlaybackFailed, error.to_string()))?;
+            self.sessions.insert(
+                monitor,
+                Session {
+                    surface,
+                    kind: SessionKind::Web,
+                    path: path.clone(),
+                    quality,
+                    volume,
+                    anime4k,
+                    user_paused: false,
+                    effective_paused: false,
+                    monitor: info,
+                },
+            );
+            status = format!("web wallpaper {} on monitor {monitor}", path.display());
+            println!("{status}");
+        } else {
+            let api = match &self.api {
+                Some(api) => Arc::clone(api),
+                None => {
+                    let api = playback::load_libmpv()
+                        .map_err(|error| (ipc::ErrorCode::Internal, format!("{error:#}")))?;
+                    self.api = Some(Arc::clone(&api));
+                    api
+                }
+            };
+            let surface = self.host.create_surface(monitor).map_err(internal)?;
+            let wid = match self.host.surface_native_handle(surface) {
+                Ok(wid) => wid,
+                Err(error) => {
+                    let _ = self.host.destroy_surface(surface);
+                    return Err(internal(error));
+                }
+            };
+            let started = match playback::start_player(
+                api,
+                wid,
+                &path,
+                quality.into(),
+                volume,
+                anime4k,
+                &info,
+            ) {
                 Ok(started) => started,
                 Err(error) => {
                     let _ = self.host.destroy_surface(surface);
                     return Err((ipc::ErrorCode::PlaybackFailed, format!("{error:#}")));
                 }
             };
-        let status = format!(
-            "playing {} on monitor {monitor} ({}, {}x{}, hwdec {}); {}",
-            path.display(),
-            started.codec,
-            started.width,
-            started.height,
-            started.hwdec,
-            started.shaders
-        );
-        println!("{status}");
-        self.sessions.insert(
-            monitor,
-            Session {
-                surface,
-                player: started.player,
-                path,
-                quality,
-                volume,
-                anime4k,
-                user_paused: false,
-                effective_paused: false,
-                width: started.width,
-                height: started.height,
-                monitor: info,
-            },
-        );
+            status = format!(
+                "playing {} on monitor {monitor} ({}, {}x{}, hwdec {}); {}",
+                path.display(),
+                started.codec,
+                started.width,
+                started.height,
+                started.hwdec,
+                started.shaders
+            );
+            println!("{status}");
+            self.sessions.insert(
+                monitor,
+                Session {
+                    surface,
+                    kind: SessionKind::Mpv {
+                        player: started.player,
+                        width: started.width,
+                        height: started.height,
+                    },
+                    path,
+                    quality,
+                    volume,
+                    anime4k,
+                    user_paused: false,
+                    effective_paused: false,
+                    monitor: info,
+                },
+            );
+        }
         // A wallpaper applied while e.g. a fullscreen game runs (or on
         // battery with the Eco policy) must obey the rules immediately;
         // clearing the flag makes the eco branch re-apply to the newcomer.
         self.battery_eco_active = false;
         self.apply_politeness();
         Ok(ipc::ResponseData::Acknowledged { status })
+    }
+
+    /// Tears a session down: an mpv player must stop rendering into the
+    /// surface window before the window is destroyed; a web surface's webview
+    /// is dropped by destroy_surface.
+    fn drop_session(&mut self, session: Session) {
+        let Session { kind, surface, .. } = session;
+        drop(kind);
+        if let Err(error) = self.host.destroy_surface(surface) {
+            eprintln!("failed to destroy surface: {error}");
+        }
     }
 
     fn stop(&mut self, monitor: Option<ipc::MonitorId>) -> CmdResult {
@@ -745,12 +840,7 @@ impl DaemonState {
         }
         for monitor in &targets {
             if let Some(session) = self.sessions.remove(monitor) {
-                // The player renders into the surface window: shut it down
-                // before destroying the window.
-                drop(session.player);
-                if let Err(error) = self.host.destroy_surface(session.surface) {
-                    eprintln!("failed to destroy surface on monitor {monitor}: {error}");
-                }
+                self.drop_session(session);
                 println!("stopped playback on monitor {monitor}");
             }
         }
@@ -786,7 +876,13 @@ impl DaemonState {
 
     fn set_volume(&mut self, monitor: ipc::MonitorId, volume: u8) -> CmdResult {
         let session = self.session_mut(monitor)?;
-        playback::set_volume(&session.player, volume)
+        let SessionKind::Mpv { player, .. } = &session.kind else {
+            return Err((
+                ipc::ErrorCode::InvalidRequest,
+                "web wallpapers have no volume".into(),
+            ));
+        };
+        playback::set_volume(player, volume)
             .map_err(|error| (ipc::ErrorCode::PlaybackFailed, format!("{error:#}")))?;
         session.volume = volume;
         Ok(ipc::ResponseData::Acknowledged {
@@ -801,12 +897,23 @@ impl DaemonState {
         anime4k: bool,
     ) -> CmdResult {
         let session = self.session_mut(monitor)?;
+        let SessionKind::Mpv {
+            player,
+            width,
+            height,
+        } = &session.kind
+        else {
+            return Err((
+                ipc::ErrorCode::InvalidRequest,
+                "web wallpapers have no quality profile".into(),
+            ));
+        };
         let shaders = playback::set_quality(
-            &session.player,
+            player,
             quality.into(),
             anime4k,
-            session.width,
-            session.height,
+            *width,
+            *height,
             &session.monitor,
         )
         .map_err(|error| (ipc::ErrorCode::PlaybackFailed, format!("{error:#}")))?;
@@ -833,9 +940,8 @@ impl DaemonState {
     }
 
     fn stop_all(&mut self) {
-        for (_, session) in self.sessions.drain() {
-            drop(session.player);
-            let _ = self.host.destroy_surface(session.surface);
+        for session in self.sessions.drain().map(|(_, s)| s).collect::<Vec<_>>() {
+            self.drop_session(session);
         }
     }
 }
