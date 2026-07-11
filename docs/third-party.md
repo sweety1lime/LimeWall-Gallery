@@ -66,6 +66,8 @@
 | base64 0.22 | MIT OR Apache-2.0 | превью через invoke |
 | zip 8 | MIT | контейнер .wpk (crates/wpk) |
 | windows-registry 0.5 | MIT OR Apache-2.0 | ассоциация .wpk в HKCU |
+| tauri-plugin-single-instance 2 | MIT OR Apache-2.0 | одно окно панели; второй запуск отдаёт argv первому |
+| winresource 0.1 (build) | MIT | иконка в renderer.exe |
 | tempfile 3 (dev) | MIT OR Apache-2.0 | временные каталоги в тестах |
 
 ## Frontend-зависимости UI (npm, apps/ui)

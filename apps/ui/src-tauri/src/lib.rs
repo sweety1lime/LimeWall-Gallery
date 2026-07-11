@@ -176,9 +176,60 @@ async fn library_export(id: String, target: String) -> Result<(), String> {
     blocking(move || library::Library::default_location()?.export(&id, Path::new(&target))).await
 }
 
+/// `.wpk` files among command line arguments (double-click / "open with").
+fn packages_in(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::path::PathBuf> {
+    args.skip(1)
+        .map(std::path::PathBuf::from)
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("wpk"))
+                && path.is_file()
+        })
+        .collect()
+}
+
+/// Imports packages off the UI thread and tells the panel to refresh.
+fn import_packages(app: tauri::AppHandle, packages: Vec<std::path::PathBuf>) {
+    use tauri::Emitter;
+    if packages.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = match library::Library::default_location() {
+            Ok(library) => library,
+            Err(error) => {
+                eprintln!("library unavailable: {error}");
+                return;
+            }
+        };
+        for package in packages {
+            match library.import(&package) {
+                Ok(item) => println!("imported {} from {}", item.name, package.display()),
+                Err(error) => {
+                    eprintln!("failed to import {}: {error}", package.display());
+                }
+            }
+        }
+        let _ = app.emit("library-changed", ());
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must come first: a second launch (e.g. double-clicking a .wpk)
+        // hands its arguments to the running instance and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            import_packages(
+                app.clone(),
+                packages_in(argv.into_iter().map(std::ffi::OsString::from)),
+            );
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -201,43 +252,12 @@ pub fn run() {
             library_preview,
             library_export,
         ])
-        .setup(|_app| {
+        .setup(|app| {
             // Double-clicking a .wpk should land here (per-user, no admin).
             if let Err(error) = assoc::register() {
                 eprintln!("wpk association not registered: {error}");
             }
-            // Packages passed on the command line (double-click) import now;
-            // the panel picks them up with its next library refresh.
-            let packages: Vec<std::path::PathBuf> = std::env::args_os()
-                .skip(1)
-                .map(std::path::PathBuf::from)
-                .filter(|path| {
-                    path.extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("wpk"))
-                        && path.is_file()
-                })
-                .collect();
-            if !packages.is_empty() {
-                tauri::async_runtime::spawn_blocking(move || {
-                    let library = match library::Library::default_location() {
-                        Ok(library) => library,
-                        Err(error) => {
-                            eprintln!("library unavailable: {error}");
-                            return;
-                        }
-                    };
-                    for package in packages {
-                        match library.import(&package) {
-                            Ok(item) => {
-                                println!("imported {} from {}", item.name, package.display())
-                            }
-                            Err(error) => {
-                                eprintln!("failed to import {}: {error}", package.display());
-                            }
-                        }
-                    }
-                });
-            }
+            import_packages(app.handle().clone(), packages_in(std::env::args_os()));
             Ok(())
         })
         .run(tauri::generate_context!())

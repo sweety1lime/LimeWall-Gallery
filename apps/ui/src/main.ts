@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
@@ -429,6 +430,9 @@ function volumeLabel(value: number): string {
 window.addEventListener("DOMContentLoaded", () => {
   connectButton.addEventListener("click", () => void connect());
   importButton.addEventListener("click", () => void importDialog());
+  // A second app launch (double-clicked .wpk) imports in the backend and
+  // pings us to show the result.
+  void listen("library-changed", () => void refreshLibrary());
   void getCurrentWebview().onDragDropEvent((event) => {
     if (event.payload.type === "over") {
       document.body.classList.add("dragging");
