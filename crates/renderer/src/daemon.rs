@@ -680,12 +680,13 @@ impl DaemonState {
                 }
             };
         let status = format!(
-            "playing {} on monitor {monitor} ({}, {}x{}, hwdec {})",
+            "playing {} on monitor {monitor} ({}, {}x{}, hwdec {}); {}",
             path.display(),
             started.codec,
             started.width,
             started.height,
-            started.hwdec
+            started.hwdec,
+            started.shaders
         );
         println!("{status}");
         self.sessions.insert(
@@ -783,7 +784,7 @@ impl DaemonState {
         anime4k: bool,
     ) -> CmdResult {
         let session = self.session_mut(monitor)?;
-        playback::set_quality(
+        let shaders = playback::set_quality(
             &session.player,
             quality.into(),
             anime4k,
@@ -794,9 +795,9 @@ impl DaemonState {
         .map_err(|error| (ipc::ErrorCode::PlaybackFailed, format!("{error:#}")))?;
         session.quality = quality;
         session.anime4k = anime4k;
-        Ok(ipc::ResponseData::Acknowledged {
-            status: format!("quality updated on monitor {monitor}"),
-        })
+        let status = format!("monitor {monitor}: {shaders}");
+        println!("{status}");
+        Ok(ipc::ResponseData::Acknowledged { status })
     }
 
     fn session(&self, monitor: ipc::MonitorId) -> Result<&Session, (ipc::ErrorCode, String)> {

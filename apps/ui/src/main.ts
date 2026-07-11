@@ -393,7 +393,7 @@ window.addEventListener("DOMContentLoaded", () => {
       .then((status) => report(status))
       .catch(() => {});
   });
-  qualitySelect.addEventListener("change", () => {
+  const pushQuality = () => {
     if (!connected) return;
     void call<string>("set_quality", {
       monitor: selectedMonitor,
@@ -402,6 +402,8 @@ window.addEventListener("DOMContentLoaded", () => {
     })
       .then((status) => report(status))
       .catch(() => {});
-  });
+  };
+  qualitySelect.addEventListener("change", pushQuality);
+  anime4kCheckbox.addEventListener("change", pushQuality);
   void connect();
 });

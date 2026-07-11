@@ -458,6 +458,7 @@ fn play_on_surface(
         info.id
     );
     println!("hardware decoding: {}", started.hwdec);
+    println!("shaders: {}", started.shaders);
     let player = started.player;
 
     let controls = spawn_control_channel()?;

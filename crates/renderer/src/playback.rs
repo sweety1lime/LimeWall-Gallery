@@ -44,6 +44,9 @@ pub struct StartedPlayback {
     pub height: i64,
     pub codec: String,
     pub hwdec: String,
+    /// Human-readable outcome of the shader decision ("Anime4K active …",
+    /// "FSR off: …"); surfaced to the user, who cannot see the daemon log.
+    pub shaders: String,
 }
 
 /// Creates a player bound to `wid`, loads `file` and waits until playback is
@@ -99,7 +102,7 @@ pub fn start_player(
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
 
-    apply_shaders(&player, quality, anime4k, width, height, monitor)?;
+    let shaders = apply_shaders(&player, quality, anime4k, width, height, monitor)?;
 
     Ok(StartedPlayback {
         player,
@@ -107,6 +110,7 @@ pub fn start_player(
         height,
         codec,
         hwdec,
+        shaders,
     })
 }
 
@@ -164,6 +168,7 @@ fn profile_scalers(quality: Quality) -> [(&'static str, &'static str); 3] {
 }
 
 /// Switches scalers and shaders of a running player to another profile.
+/// Returns the human-readable shader outcome.
 pub fn set_quality(
     player: &mpv::Player,
     quality: Quality,
@@ -171,7 +176,7 @@ pub fn set_quality(
     width: i64,
     height: i64,
     monitor: &platform::MonitorInfo,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     for (name, value) in profile_scalers(quality) {
         player.set_property_str(name, value)?;
     }
@@ -185,7 +190,8 @@ pub fn set_volume(player: &mpv::Player, volume: u8) -> anyhow::Result<()> {
 }
 
 /// Applies the shader chain matching the profile, or clears it. Shaders are
-/// used only while upscaling; at native size they would only waste GPU cycles.
+/// used only while upscaling; at native size they would only waste GPU
+/// cycles. Returns a human-readable outcome for the user.
 fn apply_shaders(
     player: &mpv::Player,
     quality: Quality,
@@ -193,32 +199,45 @@ fn apply_shaders(
     width: i64,
     height: i64,
     monitor: &platform::MonitorInfo,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
+    let target = format!(
+        "{width}x{height} -> {}x{}",
+        monitor.bounds.width, monitor.bounds.height
+    );
     if anime4k {
         if let Some(reason) = upscaling_block_reason(width, height, monitor) {
-            println!("Anime4K skipped: {reason}");
-        } else if let Some(shaders) = find_anime4k_shaders() {
-            player.set_property_str("glsl-shaders", &shader_path_list(&shaders))?;
-            println!("Anime4K enabled: Mode B (Fast)");
-            return Ok(());
-        } else {
-            println!("Anime4K skipped: required assets/shaders/anime4k files not found");
+            player.set_property_str("glsl-shaders", "")?;
+            return Ok(format!("Anime4K off: {reason}"));
         }
-    } else if quality == Quality::Max {
+        if let Some(shaders) = find_anime4k_shaders() {
+            player.set_property_str("glsl-shaders", &shader_path_list(&shaders))?;
+            return Ok(format!("Anime4K Mode B active ({target})"));
+        }
+        player.set_property_str("glsl-shaders", "")?;
+        return Ok("Anime4K off: assets/shaders/anime4k files not found".into());
+    }
+    if quality == Quality::Max {
         if let Some(reason) = upscaling_block_reason(width, height, monitor) {
-            println!("FSR skipped: {reason}");
-        } else if let Some(shader) = find_fsr_shader() {
+            player.set_property_str("glsl-shaders", "")?;
+            return Ok(format!("FSR off: {reason}"));
+        }
+        if let Some(shader) = find_fsr_shader() {
             // mpv wants forward slashes in list options on all platforms.
             let shader = shader.to_string_lossy().replace('\\', "/");
             player.set_property_str("glsl-shaders", &shader)?;
-            println!("FSR upscaling enabled ({shader})");
-            return Ok(());
-        } else {
-            println!("FSR skipped: assets/shaders/FSR.glsl not found");
+            return Ok(format!("FSR active ({target})"));
         }
+        player.set_property_str("glsl-shaders", "")?;
+        return Ok("FSR off: assets/shaders/FSR.glsl not found".into());
     }
     player.set_property_str("glsl-shaders", "")?;
-    Ok(())
+    Ok(format!(
+        "plain {} scaling",
+        match quality {
+            Quality::Eco => "bilinear",
+            Quality::Balanced | Quality::Max => "lanczos",
+        }
+    ))
 }
 
 /// `Some(reason)` when upscaling shaders must stay off.
