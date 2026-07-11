@@ -37,14 +37,14 @@
 
 ## Anime4K GLSL v4.0.1 (MIT / public domain)
 
-- **Что**: рекомендованная авторами цепочка Mode B (Fast) для mpv; шесть файлов в
-  `assets/shaders/anime4k/`.
+- **Что**: рекомендованная авторами цепочка **Mode A** для mpv (видимый апскейл;
+  Mode B оказался слишком мягким); шесть файлов в `assets/shaders/anime4k/`.
 - **Источник**: официальный релиз <https://github.com/bloc97/Anime4K/releases/tag/v4.0.1>,
   архив `Anime4K_v4.0.zip`.
 - **SHA-256 архива**: `139CD282086457C5ADC79CAF7B75B8B825091D71C9B54958C18745FEA62D7ED7`.
-- **Лицензия**: MIT для `Clamp_Highlights`, `Restore_CNN_Soft_M` и двух
-  `Upscale_CNN`; public domain для двух `AutoDownscalePre`. Полные тексты лицензий
-  сохранены в шапке каждого файла.
+- **Лицензия**: MIT для `Clamp_Highlights`, `Restore_CNN_M` и двух `Upscale_CNN`;
+  public domain для двух `AutoDownscalePre`. Полные тексты лицензий сохранены в
+  шапке каждого файла.
 - **Профиль**: opt-in флаг `--anime4k`; шейдеры включаются только при апскейле и
   заменяют FSR, если одновременно выбран `--quality max`.
 

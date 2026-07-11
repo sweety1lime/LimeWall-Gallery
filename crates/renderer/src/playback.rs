@@ -211,7 +211,7 @@ fn apply_shaders(
         }
         if let Some(shaders) = find_anime4k_shaders() {
             player.set_property_str("glsl-shaders", &shader_path_list(&shaders))?;
-            return Ok(format!("Anime4K Mode B active ({target})"));
+            return Ok(format!("Anime4K Mode A active ({target})"));
         }
         player.set_property_str("glsl-shaders", "")?;
         return Ok("Anime4K off: assets/shaders/anime4k files not found".into());
@@ -271,9 +271,11 @@ fn video_size(player: &mpv::Player) -> (i64, i64) {
     (0, 0)
 }
 
-pub const ANIME4K_MODE_B_FAST: [&str; 6] = [
+/// Anime4K Mode A (Fast): line restoration + CNN upscale. Mode A is the
+/// visible upscaling preset; Mode B (soft restore) was too subtle to notice.
+pub const ANIME4K_MODE_A: [&str; 6] = [
     "Anime4K_Clamp_Highlights.glsl",
-    "Anime4K_Restore_CNN_Soft_M.glsl",
+    "Anime4K_Restore_CNN_M.glsl",
     "Anime4K_Upscale_CNN_x2_M.glsl",
     "Anime4K_AutoDownscalePre_x2.glsl",
     "Anime4K_AutoDownscalePre_x4.glsl",
@@ -284,7 +286,7 @@ pub fn find_anime4k_shaders() -> Option<Vec<PathBuf>> {
     shader_roots()
         .map(|root| root.join("anime4k"))
         .find_map(|root| {
-            let shaders: Vec<_> = ANIME4K_MODE_B_FAST
+            let shaders: Vec<_> = ANIME4K_MODE_A
                 .iter()
                 .map(|name| root.join(name))
                 .collect();

@@ -40,7 +40,7 @@ enum Command {
         /// Initial volume 0-100; 0 keeps the player muted (the default).
         #[arg(long, default_value_t = 0)]
         volume: u8,
-        /// Use the Anime4K Mode B (Fast) shader chain while upscaling.
+        /// Use the Anime4K Mode A shader chain while upscaling.
         #[arg(long)]
         anime4k: bool,
     },
@@ -85,7 +85,7 @@ enum DaemonCommand {
         /// Volume 0-100; 0 keeps the player muted.
         #[arg(long, default_value_t = 0)]
         volume: u8,
-        /// Use the Anime4K Mode B (Fast) shader chain while upscaling.
+        /// Use the Anime4K Mode A shader chain while upscaling.
         #[arg(long)]
         anime4k: bool,
     },
@@ -118,7 +118,7 @@ enum DaemonCommand {
         quality: Quality,
         #[arg(long, default_value_t = 0)]
         monitor: platform::MonitorId,
-        /// Use the Anime4K Mode B (Fast) shader chain while upscaling.
+        /// Use the Anime4K Mode A shader chain while upscaling.
         #[arg(long)]
         anime4k: bool,
     },
@@ -641,7 +641,7 @@ mod tests {
     fn anime4k_bundle_is_complete() {
         let shaders =
             playback::find_anime4k_shaders().expect("vendored Anime4K bundle should be present");
-        assert_eq!(shaders.len(), playback::ANIME4K_MODE_B_FAST.len());
+        assert_eq!(shaders.len(), playback::ANIME4K_MODE_A.len());
     }
 
     #[test]
