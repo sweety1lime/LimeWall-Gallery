@@ -8,7 +8,8 @@ use std::thread::JoinHandle;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    ExtractIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
@@ -176,9 +177,10 @@ fn notify_icon_data(window: HWND) -> NOTIFYICONDATAW {
         uCallbackMessage: WM_TRAY_CALLBACK,
         ..Default::default()
     };
-    // Branded icon comes with the bundling task; the generic one works
-    // everywhere and needs no resource compilation.
-    data.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION) }.unwrap_or_default();
+    // The brand icon is embedded into the executable as its first icon
+    // resource; a plain build without it falls back to the system icon.
+    data.hIcon = own_executable_icon()
+        .unwrap_or_else(|| unsafe { LoadIconW(None, IDI_APPLICATION) }.unwrap_or_default());
     TRAY.with_borrow(|slot| {
         if let Some(state) = slot.as_ref() {
             let len = state.tooltip.len().min(data.szTip.len());
@@ -186,6 +188,28 @@ fn notify_icon_data(window: HWND) -> NOTIFYICONDATAW {
         }
     });
     data
+}
+
+/// First icon of the running executable, when one is embedded.
+fn own_executable_icon() -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
+    use std::os::windows::ffi::OsStrExt;
+    let exe = std::env::current_exe().ok()?;
+    let mut wide: Vec<u16> = exe.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let instance = unsafe { GetModuleHandleW(None) }.ok()?;
+    let icon = unsafe {
+        ExtractIconW(
+            Some(instance.into()),
+            windows::core::PCWSTR(wide.as_ptr()),
+            0,
+        )
+    };
+    // NULL means no icons; 1 is the documented "not an executable" marker.
+    if icon.is_invalid() || icon.0 as usize == 1 {
+        None
+    } else {
+        Some(icon)
+    }
 }
 
 fn add_icon(window: HWND) -> Result<()> {
