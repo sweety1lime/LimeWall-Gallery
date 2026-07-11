@@ -254,6 +254,12 @@ body.dragging::after {
   object-fit: cover;
 }
 
+.thumb.web-thumb {
+  color: #cdeabf;
+  font-weight: 600;
+  background: linear-gradient(135deg, #24381a, #1a2a16);
+}
+
 .thumb-overlay {
   position: absolute;
   inset: 0;

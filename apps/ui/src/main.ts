@@ -23,7 +23,7 @@ interface SessionStatus {
 interface LibraryItem {
   id: string;
   name: string;
-  kind: "video" | "image";
+  kind: "video" | "image" | "web";
   file: string;
   preview: string | null;
   imported_at: number;
@@ -286,8 +286,14 @@ function renderCard(item: LibraryItem): HTMLElement {
       if (url) img.src = url;
     });
     thumb.append(img);
+  } else if (item.kind === "web") {
+    thumb.classList.add("web-thumb");
+    thumb.textContent = "🌐 веб";
   } else {
     thumb.textContent = item.kind === "video" ? "видео" : "картинка";
+  }
+  if (item.kind === "web") {
+    card.title = "Веб-обои — интерактивнее, но тяжелее видео. Кликните, чтобы поставить";
   }
   const overlay = document.createElement("div");
   overlay.className = "thumb-overlay";
@@ -367,8 +373,16 @@ async function importPaths(paths: string[]) {
   importButton.disabled = true;
   try {
     for (const path of paths) {
-      const gif = path.toLowerCase().endsWith(".gif");
-      report(gif ? "Конвертирую GIF в видео…" : "Добавляю в библиотеку…");
+      const lower = path.toLowerCase();
+      const gif = lower.endsWith(".gif");
+      const web = lower.endsWith(".html") || lower.endsWith(".htm");
+      report(
+        gif
+          ? "Конвертирую GIF в видео…"
+          : web
+            ? "Добавляю веб-обои…"
+            : "Добавляю в библиотеку…",
+      );
       try {
         const item = await call<LibraryItem>("library_import", { path });
         report(`«${item.name}» добавлено в библиотеку`);
@@ -387,7 +401,7 @@ async function importDialog() {
     multiple: true,
     filters: [
       {
-        name: "Видео, картинки и пакеты LimeWall",
+        name: "Видео, картинки, веб и пакеты LimeWall",
         extensions: [
           "mp4",
           "mkv",
@@ -401,6 +415,8 @@ async function importDialog() {
           "jpeg",
           "bmp",
           "webp",
+          "html",
+          "htm",
           "wpk",
         ],
       },
