@@ -77,14 +77,9 @@ pub fn read_manifest(package: &Path) -> Result<Manifest> {
             Err(zip::result::ZipError::FileNotFound) => return Err(WpkError::MissingManifest),
             Err(error) => return Err(error.into()),
         };
-        if file.size() > MAX_MANIFEST_BYTES {
-            return Err(WpkError::TooLarge {
-                name: MANIFEST_NAME.into(),
-                limit: MAX_MANIFEST_BYTES,
-            });
-        }
-        let mut bytes = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut bytes)?;
+        // Cap the actual decompressed bytes, not the header-declared size:
+        // a hostile archive can understate its size to slip past a check.
+        let bytes = read_capped(&mut file, MAX_MANIFEST_BYTES, MANIFEST_NAME)?;
         serde_json::from_slice(&bytes)?
     };
     validate_manifest(&manifest)?;
@@ -104,17 +99,17 @@ pub fn extract_file(package: &Path, member: &str, target: &Path) -> Result<()> {
     let mut file = archive
         .by_name(member)
         .map_err(|_| WpkError::MissingFile(member.to_owned()))?;
-    if file.size() > MAX_FILE_BYTES {
-        return Err(WpkError::TooLarge {
-            name: member.to_owned(),
-            limit: MAX_FILE_BYTES,
-        });
-    }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut output = File::create(target)?;
-    std::io::copy(&mut file, &mut output)?;
+    // Cap by the bytes actually written, so a zip bomb cannot fill the disk
+    // by lying about its uncompressed size in the header.
+    if let Err(error) = copy_capped(&mut file, &mut output, MAX_FILE_BYTES, member) {
+        drop(output);
+        let _ = std::fs::remove_file(target);
+        return Err(error);
+    }
     output.flush()?;
     Ok(())
 }
@@ -175,6 +170,38 @@ fn validate_manifest(manifest: &Manifest) -> Result<()> {
     ensure_safe_name(&manifest.entry)?;
     if let Some(preview) = &manifest.preview {
         ensure_safe_name(preview)?;
+    }
+    Ok(())
+}
+
+/// Reads at most `limit` bytes; errors if the stream has more. Guards against
+/// archives whose header understates the real decompressed size.
+fn read_capped(reader: &mut impl Read, limit: u64, name: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let read = reader.take(limit + 1).read_to_end(&mut bytes)?;
+    if read as u64 > limit {
+        return Err(WpkError::TooLarge {
+            name: name.to_owned(),
+            limit,
+        });
+    }
+    Ok(bytes)
+}
+
+/// Copies at most `limit` bytes from `reader` to `writer`; errors if the
+/// stream has more (zip-bomb guard by actual output, not the header value).
+fn copy_capped(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    limit: u64,
+    name: &str,
+) -> Result<()> {
+    let copied = std::io::copy(&mut reader.take(limit + 1), writer)?;
+    if copied > limit {
+        return Err(WpkError::TooLarge {
+            name: name.to_owned(),
+            limit,
+        });
     }
     Ok(())
 }
@@ -278,6 +305,31 @@ mod tests {
             );
         }
         assert!(ensure_safe_name("folder/wall.mp4").is_ok());
+    }
+
+    #[test]
+    fn capped_readers_reject_oversized_streams() {
+        // 100 bytes available, 64-byte cap -> rejected by actual length,
+        // regardless of any declared size elsewhere.
+        let data = vec![0u8; 100];
+        let error = read_capped(&mut data.as_slice(), 64, "x").expect_err("must reject");
+        assert!(matches!(error, WpkError::TooLarge { limit: 64, .. }));
+
+        let mut sink = Vec::new();
+        let error = copy_capped(&mut data.as_slice(), &mut sink, 64, "x").expect_err("must reject");
+        assert!(matches!(error, WpkError::TooLarge { limit: 64, .. }));
+
+        // Exactly at the cap is fine.
+        let ok = vec![7u8; 64];
+        assert_eq!(
+            read_capped(&mut ok.as_slice(), 64, "x")
+                .expect("fits")
+                .len(),
+            64
+        );
+        let mut sink = Vec::new();
+        copy_capped(&mut ok.as_slice(), &mut sink, 64, "x").expect("fits");
+        assert_eq!(sink.len(), 64);
     }
 
     #[test]
