@@ -313,7 +313,7 @@ fn convert_gif_to_mp4(source: &Path, target: &Path) -> Result<(), String> {
             "-rate_control",
             "quality",
             "-quality",
-            "70",
+            "80",
         ],
         &["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0"],
     ];

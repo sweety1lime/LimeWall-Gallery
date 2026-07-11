@@ -74,15 +74,30 @@ fn renderer_path() -> Option<PathBuf> {
 }
 
 /// Starts `renderer serve` with no console and no parent-child lifetime tie.
+/// Daemon output lands in the user data directory so problems can be
+/// diagnosed after the fact; a fresh file per daemon start.
 fn spawn_detached(renderer: &std::path::Path, endpoint: &str) -> std::io::Result<()> {
     let mut command = std::process::Command::new(renderer);
     command
         .arg("serve")
         .arg("--endpoint")
         .arg(endpoint)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null());
+    // Parallel setups and tests must not touch the real wallpaper state.
+    if let Ok(state) = std::env::var("LIMEWALL_STATE") {
+        command.arg("--state").arg(state);
+    }
+    match daemon_log_file() {
+        Some(log) => {
+            let errors = log.try_clone()?;
+            command.stdout(log).stderr(errors);
+        }
+        None => {
+            command
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -91,6 +106,12 @@ fn spawn_detached(renderer: &std::path::Path, endpoint: &str) -> std::io::Result
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     command.spawn().map(drop)
+}
+
+fn daemon_log_file() -> Option<std::fs::File> {
+    let dir = dirs::data_dir()?.join("LimeWall");
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::File::create(dir.join("daemon.log")).ok()
 }
 
 #[cfg(test)]
@@ -105,6 +126,15 @@ mod tests {
             eprintln!("skipped: renderer executable is not built");
             return;
         };
+        // Keep the spawned daemon away from the user's wallpaper state.
+        let state = std::env::temp_dir().join(format!(
+            "limewall-ui-test-state-{}.json",
+            std::process::id()
+        ));
+        // SAFETY: no other thread in this test binary touches this variable.
+        unsafe {
+            std::env::set_var("LIMEWALL_STATE", &state);
+        }
         let endpoint = format!("limewall-ui-test-{}.sock", std::process::id());
 
         let version = ensure_daemon(&endpoint).expect("daemon should start and answer");
