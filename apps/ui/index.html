@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
@@ -13,78 +13,81 @@
       <header class="row header">
         <h1>LimeWall <span class="brand">by 2fame</span></h1>
         <div class="daemon">
-          <label>
-            On battery
-            <select id="battery" disabled>
-              <option value="pause" selected>Pause</option>
-              <option value="eco">Eco profile</option>
-              <option value="keep">Keep playing</option>
-            </select>
-          </label>
-          <label class="checkbox">
-            <input id="autostart" type="checkbox" disabled />
-            Start with Windows
-          </label>
-          <span id="daemon-state" class="state offline">offline</span>
-          <button id="connect" type="button">Connect</button>
+          <span id="daemon-state" class="state offline">
+            <span class="dot"></span><span id="daemon-text">нет связи</span>
+          </span>
+          <button id="connect" type="button" hidden>Подключить</button>
         </div>
       </header>
 
+      <section id="now-playing" class="panel now-playing" hidden>
+        <h2>Сейчас на рабочем столе</h2>
+        <div id="sessions" class="sessions"></div>
+      </section>
+
       <section class="panel">
-        <h2>Monitors</h2>
-        <div id="monitors" class="monitors">
-          <p class="hint">Connect to the renderer to list monitors.</p>
+        <div class="row panel-head">
+          <h2>Библиотека</h2>
+          <button id="import" type="button" class="primary">＋ Добавить</button>
+        </div>
+        <div id="library" class="library"></div>
+        <div id="dropzone" class="dropzone">
+          <div class="dropzone-icon">🖼</div>
+          <p>Перетащите сюда видео, GIF или картинку —<br />или нажмите «Добавить»</p>
+          <p class="hint">Кликните по любой карточке, чтобы поставить её на рабочий стол</p>
         </div>
       </section>
 
       <section class="panel">
-        <h2>Library</h2>
-        <div class="row">
-          <button id="import" type="button">Import…</button>
-          <span class="hint">or drop media files anywhere in this window</span>
-        </div>
-        <div id="library" class="library">
-          <p class="hint">Library is empty.</p>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>Wallpaper</h2>
-        <div class="row">
-          <input id="file" type="text" placeholder="Path to a video, GIF or image" />
-          <button id="browse" type="button">Browse…</button>
-        </div>
-        <div class="row options">
-          <label>
-            Quality
+        <div class="options-grid">
+          <label class="option" id="monitor-option">
+            <span class="option-name">Монитор</span>
+            <span id="monitors" class="chips"></span>
+          </label>
+          <label class="option" title="Экономия — минимальная нагрузка; Максимум — улучшение картинки, если исходник меньше экрана">
+            <span class="option-name">Качество</span>
             <select id="quality">
-              <option value="eco">Eco</option>
-              <option value="balanced" selected>Balanced</option>
-              <option value="max">Max</option>
+              <option value="eco">Экономия</option>
+              <option value="balanced" selected>Баланс</option>
+              <option value="max">Максимум</option>
             </select>
           </label>
-          <label class="checkbox">
+          <label
+            class="option checkbox"
+            title="Улучшайзер для рисованного контента (аниме). Для обычного видео оставьте выключенным"
+          >
             <input id="anime4k" type="checkbox" />
-            Anime4K
+            <span class="option-name">Аниме-режим</span>
           </label>
-          <label class="volume">
-            Volume
+          <label class="option volume" title="У GIF и картинок звука нет — ползунок на них не влияет">
+            <span class="option-name">Звук</span>
             <input id="volume" type="range" min="0" max="100" value="0" />
-            <span id="volume-value">0</span>
+            <span id="volume-value" class="option-name">выкл</span>
           </label>
-        </div>
-        <div class="row actions">
-          <button id="apply" type="button" class="primary">Apply</button>
-          <button id="pause" type="button">Pause</button>
-          <button id="resume" type="button">Resume</button>
-          <button id="stop" type="button">Stop</button>
         </div>
       </section>
 
-      <section class="panel">
-        <h2>Active sessions</h2>
-        <div id="sessions"><p class="hint">Nothing is playing.</p></div>
-      </section>
+      <details class="panel settings">
+        <summary>Настройки</summary>
+        <div class="options-grid">
+          <label class="option checkbox">
+            <input id="autostart" type="checkbox" disabled />
+            <span class="option-name">Запускать вместе с Windows</span>
+          </label>
+          <label class="option" title="Что делать с обоями, когда ноутбук работает от батареи">
+            <span class="option-name">От батареи</span>
+            <select id="battery" disabled>
+              <option value="pause" selected>Ставить на паузу</option>
+              <option value="eco">Снижать качество</option>
+              <option value="keep">Играть как обычно</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint">
+          Обои сами встают на паузу за полноэкранной игрой, на экране блокировки и при
+          выключенном мониторе — и сами продолжаются.
+        </p>
+      </details>
 
       <p id="message" class="message"></p>
     </main>

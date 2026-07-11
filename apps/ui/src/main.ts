@@ -26,6 +26,8 @@ interface LibraryItem {
   file: string;
   preview: string | null;
   imported_at: number;
+  author?: string | null;
+  license?: string | null;
 }
 
 const el = <T extends HTMLElement>(id: string): T => {
@@ -35,12 +37,17 @@ const el = <T extends HTMLElement>(id: string): T => {
 };
 
 const daemonState = el<HTMLSpanElement>("daemon-state");
+const daemonText = el<HTMLSpanElement>("daemon-text");
 const connectButton = el<HTMLButtonElement>("connect");
 const autostartCheckbox = el<HTMLInputElement>("autostart");
 const batterySelect = el<HTMLSelectElement>("battery");
-const monitorsBox = el<HTMLDivElement>("monitors");
+const monitorsBox = el<HTMLSpanElement>("monitors");
+const monitorOption = el<HTMLLabelElement>("monitor-option");
+const nowPlaying = el<HTMLElement>("now-playing");
 const sessionsBox = el<HTMLDivElement>("sessions");
-const fileInput = el<HTMLInputElement>("file");
+const libraryBox = el<HTMLDivElement>("library");
+const dropzone = el<HTMLDivElement>("dropzone");
+const importButton = el<HTMLButtonElement>("import");
 const qualitySelect = el<HTMLSelectElement>("quality");
 const anime4kCheckbox = el<HTMLInputElement>("anime4k");
 const volumeRange = el<HTMLInputElement>("volume");
@@ -50,6 +57,9 @@ const messageBox = el<HTMLParagraphElement>("message");
 let connected = false;
 let selectedMonitor = 0;
 let refreshTimer: number | undefined;
+let libraryItems: LibraryItem[] = [];
+let activeSessions: SessionStatus[] = [];
+const previewCache = new Map<string, string>();
 
 function report(text: string, isError = false) {
   messageBox.textContent = text;
@@ -65,11 +75,28 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   }
 }
 
+// Windows canonical paths carry a \\?\ prefix; the library stores plain ones.
+function normalizePath(path: string): string {
+  return path.replace(/^\\\\\?\\/, "").toLowerCase();
+}
+
+function itemForPath(path: string | null): LibraryItem | undefined {
+  if (!path) return undefined;
+  const wanted = normalizePath(path);
+  return libraryItems.find((item) => normalizePath(item.file) === wanted);
+}
+
+function fileStem(path: string): string {
+  const base = path.split(/[\\/]/).pop() ?? path;
+  return base.replace(/\.[^.]+$/, "");
+}
+
 function setConnected(version: string | null) {
   connected = version !== null;
-  daemonState.textContent = connected ? `online v${version}` : "offline";
+  daemonText.textContent = connected ? "подключено" : "нет связи";
   daemonState.classList.toggle("online", connected);
   daemonState.classList.toggle("offline", !connected);
+  connectButton.hidden = connected;
   if (connected && refreshTimer === undefined) {
     refreshTimer = window.setInterval(() => {
       refreshSessions().catch(() => setDisconnected());
@@ -90,10 +117,10 @@ async function connect() {
   try {
     const version = await call<string>("daemon_connect");
     setConnected(version);
-    report("connected to renderer daemon");
+    report("");
     await refreshMonitors();
-    await refreshSessions();
     await refreshLibrary();
+    await refreshSessions();
     try {
       autostartCheckbox.checked = await invoke<boolean>("get_autostart");
       autostartCheckbox.disabled = false;
@@ -108,6 +135,7 @@ async function connect() {
     }
   } catch {
     setDisconnected();
+    report("Не удалось запустить фоновый плеер. Нажмите «Подключить», чтобы повторить.", true);
   } finally {
     connectButton.disabled = false;
   }
@@ -116,141 +144,199 @@ async function connect() {
 async function refreshMonitors() {
   const monitors = await call<Monitor[]>("list_monitors");
   monitorsBox.replaceChildren();
-  if (monitors.length === 0) {
-    monitorsBox.textContent = "no monitors detected";
-    return;
-  }
+  if (monitors.length === 0) return;
   if (!monitors.some((monitor) => monitor.id === selectedMonitor)) {
     selectedMonitor = monitors[0].id;
   }
+  // One monitor: nothing to choose, hide the whole row.
+  monitorOption.hidden = monitors.length < 2;
   for (const monitor of monitors) {
-    const label = document.createElement("label");
-    label.className = "monitor";
-    const radio = document.createElement("input");
-    radio.type = "radio";
-    radio.name = "monitor";
-    radio.value = String(monitor.id);
-    radio.checked = monitor.id === selectedMonitor;
-    radio.addEventListener("change", () => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.classList.toggle("selected", monitor.id === selectedMonitor);
+    chip.textContent = `${monitor.id + 1}: ${monitor.bounds.width}×${monitor.bounds.height}`;
+    chip.title = monitor.name + (monitor.is_primary ? " (основной)" : "");
+    chip.addEventListener("click", () => {
       selectedMonitor = monitor.id;
+      void refreshMonitors();
     });
-    const text = document.createElement("span");
-    text.textContent =
-      `${monitor.id}: ${monitor.name}  ${monitor.bounds.width}x${monitor.bounds.height}` +
-      (monitor.is_primary ? "  (primary)" : "");
-    label.append(radio, text);
-    monitorsBox.append(label);
+    monitorsBox.append(chip);
   }
+}
+
+function sessionTitle(session: SessionStatus): string {
+  const item = itemForPath(session.path);
+  if (item) return item.name;
+  return session.path ? fileStem(session.path) : "обои";
 }
 
 async function refreshSessions() {
-  const sessions = await call<SessionStatus[]>("daemon_status");
+  activeSessions = await call<SessionStatus[]>("daemon_status");
+  nowPlaying.hidden = activeSessions.length === 0;
   sessionsBox.replaceChildren();
-  if (sessions.length === 0) {
-    const hint = document.createElement("p");
-    hint.className = "hint";
-    hint.textContent = "Nothing is playing.";
-    sessionsBox.append(hint);
-    return;
+  for (const session of activeSessions) {
+    sessionsBox.append(renderSession(session));
   }
-  for (const session of sessions) {
-    const row = document.createElement("div");
-    row.className = "session";
-    const anime4k = session.anime4k ? " + anime4k" : "";
-    row.textContent =
-      `monitor ${session.monitor}: ${session.state}  ` +
-      `${session.path ?? "-"}  [${session.quality}${anime4k}, volume ${session.volume}]`;
-    sessionsBox.append(row);
+  markActiveCards();
+}
+
+function renderSession(session: SessionStatus): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "session-row";
+
+  const item = itemForPath(session.path);
+  const thumb = document.createElement("div");
+  thumb.className = "session-thumb";
+  if (item?.preview) {
+    const img = document.createElement("img");
+    void previewUrl(item.id).then((url) => {
+      if (url) img.src = url;
+    });
+    thumb.append(img);
+  }
+  row.append(thumb);
+
+  const info = document.createElement("div");
+  info.className = "session-info";
+  const title = document.createElement("div");
+  title.className = "session-title";
+  title.textContent = sessionTitle(session);
+  const state = document.createElement("div");
+  state.className = "session-state";
+  const monitorPart = activeSessions.length > 1 ? `монитор ${session.monitor + 1} · ` : "";
+  state.textContent = monitorPart + (session.state === "paused" ? "на паузе" : "играет");
+  info.append(title, state);
+  row.append(info);
+
+  const controls = document.createElement("div");
+  controls.className = "session-controls";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  if (session.state === "paused") {
+    toggle.textContent = "▶ Продолжить";
+    toggle.addEventListener("click", () => void sessionCommand("resume", session.monitor));
+  } else {
+    toggle.textContent = "⏸ Пауза";
+    toggle.addEventListener("click", () => void sessionCommand("pause", session.monitor));
+  }
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "Убрать";
+  remove.title = "Вернуть обычные обои Windows";
+  remove.addEventListener("click", () => void sessionCommand("stop", session.monitor));
+  controls.append(toggle, remove);
+  row.append(controls);
+  return row;
+}
+
+async function sessionCommand(command: "pause" | "resume" | "stop", monitor: number) {
+  await call<string>(command, { monitor });
+  await refreshSessions();
+}
+
+async function previewUrl(id: string): Promise<string | undefined> {
+  const cached = previewCache.get(id);
+  if (cached) return cached;
+  try {
+    const data = await invoke<string>("library_preview", { id });
+    const url = `data:image/jpeg;base64,${data}`;
+    previewCache.set(id, url);
+    return url;
+  } catch {
+    return undefined;
   }
 }
 
-const libraryBox = el<HTMLDivElement>("library");
-const previewCache = new Map<string, string>();
-
 async function refreshLibrary() {
-  const items = await call<LibraryItem[]>("library_list");
+  libraryItems = await call<LibraryItem[]>("library_list");
   libraryBox.replaceChildren();
-  if (items.length === 0) {
-    const hint = document.createElement("p");
-    hint.className = "hint";
-    hint.textContent = "Library is empty.";
-    libraryBox.append(hint);
-    return;
-  }
-  items.sort((a, b) => b.imported_at - a.imported_at);
-  for (const item of items) {
+  const empty = libraryItems.length === 0;
+  dropzone.classList.toggle("expanded", empty);
+  if (empty) return;
+  libraryItems.sort((a, b) => b.imported_at - a.imported_at);
+  for (const item of libraryItems) {
     libraryBox.append(renderCard(item));
+  }
+  markActiveCards();
+}
+
+function markActiveCards() {
+  const activePaths = new Set(
+    activeSessions.map((session) => normalizePath(session.path ?? "")),
+  );
+  for (const card of libraryBox.querySelectorAll<HTMLElement>(".card")) {
+    const file = card.dataset.file ?? "";
+    card.classList.toggle("active", activePaths.has(normalizePath(file)));
   }
 }
 
 function renderCard(item: LibraryItem): HTMLElement {
   const card = document.createElement("div");
   card.className = "card";
-  card.title = item.file;
+  card.dataset.file = item.file;
+  card.title = "Кликните, чтобы поставить на рабочий стол";
 
   const thumb = document.createElement("div");
   thumb.className = "thumb";
   if (item.preview) {
     const img = document.createElement("img");
-    const cached = previewCache.get(item.id);
-    if (cached) {
-      img.src = cached;
-    } else {
-      void call<string>("library_preview", { id: item.id })
-        .then((data) => {
-          const url = `data:image/jpeg;base64,${data}`;
-          previewCache.set(item.id, url);
-          img.src = url;
-        })
-        .catch(() => {});
-    }
+    void previewUrl(item.id).then((url) => {
+      if (url) img.src = url;
+    });
     thumb.append(img);
   } else {
-    thumb.textContent = item.kind === "video" ? "video" : "image";
+    thumb.textContent = item.kind === "video" ? "видео" : "картинка";
   }
+  const overlay = document.createElement("div");
+  overlay.className = "thumb-overlay";
+  overlay.textContent = "Поставить";
+  thumb.append(overlay);
+  const badge = document.createElement("div");
+  badge.className = "badge";
+  badge.textContent = "на столе";
+  thumb.append(badge);
   card.append(thumb);
 
+  const footer = document.createElement("div");
+  footer.className = "card-footer";
   const name = document.createElement("div");
   name.className = "name";
   name.textContent = item.name;
-  card.append(name);
+  name.title = item.name;
+  footer.append(name);
 
-  const actions = document.createElement("div");
-  actions.className = "card-actions";
-  const applyButton = document.createElement("button");
-  applyButton.textContent = "Apply";
-  applyButton.className = "primary";
-  applyButton.addEventListener("click", () => void applyLibraryItem(item));
+  const menu = document.createElement("div");
+  menu.className = "card-menu";
   const exportButton = document.createElement("button");
+  exportButton.type = "button";
   exportButton.textContent = "⇪";
-  exportButton.title = "Export as .wpk package";
-  exportButton.addEventListener("click", () => void exportLibraryItem(item));
+  exportButton.title = "Поделиться: сохранить как .wpk-файл";
+  exportButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void exportLibraryItem(item);
+  });
   const removeButton = document.createElement("button");
+  removeButton.type = "button";
   removeButton.textContent = "✕";
-  removeButton.title = "Remove from library";
-  removeButton.addEventListener("click", () => {
+  removeButton.title = "Удалить из библиотеки";
+  removeButton.addEventListener("click", (event) => {
+    event.stopPropagation();
     void call<void>("library_remove", { id: item.id }).then(() => {
       previewCache.delete(item.id);
       void refreshLibrary();
     });
   });
-  actions.append(applyButton, exportButton, removeButton);
-  card.append(actions);
+  menu.append(exportButton, removeButton);
+  footer.append(menu);
+  card.append(footer);
+
+  card.addEventListener("click", () => void applyLibraryItem(item));
   return card;
 }
 
-async function exportLibraryItem(item: LibraryItem) {
-  const target = await save({
-    defaultPath: `${item.name}.wpk`,
-    filters: [{ name: "LimeWall package", extensions: ["wpk"] }],
-  });
-  if (typeof target !== "string") return;
-  await call<void>("library_export", { id: item.id, target });
-  report(`exported ${item.name} to ${target}`);
-}
-
 async function applyLibraryItem(item: LibraryItem) {
-  fileInput.value = item.file;
+  report(`Ставлю «${item.name}»…`);
   const status = await call<string>("play", {
     path: item.file,
     monitor: selectedMonitor,
@@ -258,19 +344,39 @@ async function applyLibraryItem(item: LibraryItem) {
     volume: Number(volumeRange.value),
     anime4k: anime4kCheckbox.checked,
   });
-  report(status);
+  report(friendlyVerdict(status) ?? `«${item.name}» теперь на рабочем столе`);
   await refreshSessions();
 }
 
+/// The daemon acknowledgements are technical English; keep the useful part.
+function friendlyVerdict(status: string): string | undefined {
+  if (status.includes("Anime4K") && status.includes("active")) {
+    return "Готово — аниме-улучшение включено";
+  }
+  if (status.includes("FSR active")) {
+    return "Готово — улучшение картинки включено";
+  }
+  if (status.includes(">= monitor resolution")) {
+    return "Готово. Улучшение не нужно: исходник не меньше экрана";
+  }
+  return undefined;
+}
+
 async function importPaths(paths: string[]) {
-  for (const path of paths) {
-    report(`importing ${path}…`);
-    try {
-      const item = await call<LibraryItem>("library_import", { path });
-      report(`imported ${item.name}`);
-    } catch {
-      // error already reported by call()
+  importButton.disabled = true;
+  try {
+    for (const path of paths) {
+      const gif = path.toLowerCase().endsWith(".gif");
+      report(gif ? "Конвертирую GIF в видео…" : "Добавляю в библиотеку…");
+      try {
+        const item = await call<LibraryItem>("library_import", { path });
+        report(`«${item.name}» добавлено в библиотеку`);
+      } catch {
+        // error text is already in the message line
+      }
     }
+  } finally {
+    importButton.disabled = false;
   }
   await refreshLibrary();
 }
@@ -280,7 +386,7 @@ async function importDialog() {
     multiple: true,
     filters: [
       {
-        name: "Media and packages",
+        name: "Видео, картинки и пакеты LimeWall",
         extensions: [
           "mp4",
           "mkv",
@@ -306,104 +412,76 @@ async function importDialog() {
   }
 }
 
-async function browse() {
-  const picked = await open({
-    multiple: false,
-    filters: [
-      {
-        name: "Media",
-        extensions: [
-          "mp4",
-          "mkv",
-          "webm",
-          "mov",
-          "avi",
-          "gif",
-          "png",
-          "jpg",
-          "jpeg",
-          "bmp",
-          "webp",
-        ],
-      },
-    ],
+async function exportLibraryItem(item: LibraryItem) {
+  const target = await save({
+    defaultPath: `${item.name}.wpk`,
+    filters: [{ name: "Пакет LimeWall", extensions: ["wpk"] }],
   });
-  if (typeof picked === "string") {
-    fileInput.value = picked;
-  }
+  if (typeof target !== "string") return;
+  await call<void>("library_export", { id: item.id, target });
+  report(`«${item.name}» сохранено как ${target}`);
 }
 
-async function apply() {
-  const path = fileInput.value.trim();
-  if (!path) {
-    report("choose a media file first", true);
-    return;
-  }
-  const status = await call<string>("play", {
-    path,
-    monitor: selectedMonitor,
-    quality: qualitySelect.value,
-    volume: Number(volumeRange.value),
-    anime4k: anime4kCheckbox.checked,
-  });
-  report(status);
-  await refreshSessions();
-}
-
-async function simple(command: "pause" | "resume" | "stop") {
-  const status = await call<string>(command, { monitor: selectedMonitor });
-  report(status);
-  await refreshSessions();
+function volumeLabel(value: number): string {
+  return value === 0 ? "выкл" : String(value);
 }
 
 window.addEventListener("DOMContentLoaded", () => {
   connectButton.addEventListener("click", () => void connect());
-  el<HTMLButtonElement>("import").addEventListener("click", () => void importDialog());
+  importButton.addEventListener("click", () => void importDialog());
   void getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type === "over") {
+      document.body.classList.add("dragging");
+    } else {
+      document.body.classList.remove("dragging");
+    }
     if (event.payload.type === "drop") {
       void importPaths(event.payload.paths);
     }
   });
-  el<HTMLButtonElement>("browse").addEventListener("click", () => void browse());
-  el<HTMLButtonElement>("apply").addEventListener("click", () => void apply());
-  el<HTMLButtonElement>("pause").addEventListener("click", () => void simple("pause"));
-  el<HTMLButtonElement>("resume").addEventListener("click", () => void simple("resume"));
-  el<HTMLButtonElement>("stop").addEventListener("click", () => void simple("stop"));
+
+  volumeRange.addEventListener("input", () => {
+    volumeValue.textContent = volumeLabel(Number(volumeRange.value));
+  });
+  volumeRange.addEventListener("change", () => {
+    if (!connected || activeSessions.length === 0) return;
+    void call<string>("set_volume", {
+      monitor: selectedMonitor,
+      volume: Number(volumeRange.value),
+    }).catch(() => {});
+  });
+
+  const pushQuality = () => {
+    if (!connected || activeSessions.length === 0) return;
+    void call<string>("set_quality", {
+      monitor: selectedMonitor,
+      quality: qualitySelect.value,
+      anime4k: anime4kCheckbox.checked,
+    })
+      .then((status) => report(friendlyVerdict(status) ?? status))
+      .catch(() => {});
+  };
+  qualitySelect.addEventListener("change", pushQuality);
+  anime4kCheckbox.addEventListener("change", pushQuality);
+
   autostartCheckbox.addEventListener("change", () => {
     void call<string>("set_autostart", { enabled: autostartCheckbox.checked })
-      .then((status) => report(status))
+      .then(() =>
+        report(
+          autostartCheckbox.checked
+            ? "LimeWall будет запускаться вместе с Windows"
+            : "Автозапуск выключен",
+        ),
+      )
       .catch(() => {
         autostartCheckbox.checked = !autostartCheckbox.checked;
       });
   });
   batterySelect.addEventListener("change", () => {
     void call<string>("set_battery_policy", { policy: batterySelect.value })
-      .then((status) => report(status))
+      .then(() => report("Настройка батареи сохранена"))
       .catch(() => {});
   });
-  volumeRange.addEventListener("input", () => {
-    volumeValue.textContent = volumeRange.value;
-  });
-  volumeRange.addEventListener("change", () => {
-    if (!connected) return;
-    void call<string>("set_volume", {
-      monitor: selectedMonitor,
-      volume: Number(volumeRange.value),
-    })
-      .then((status) => report(status))
-      .catch(() => {});
-  });
-  const pushQuality = () => {
-    if (!connected) return;
-    void call<string>("set_quality", {
-      monitor: selectedMonitor,
-      quality: qualitySelect.value,
-      anime4k: anime4kCheckbox.checked,
-    })
-      .then((status) => report(status))
-      .catch(() => {});
-  };
-  qualitySelect.addEventListener("change", pushQuality);
-  anime4kCheckbox.addEventListener("change", pushQuality);
+
   void connect();
 });
