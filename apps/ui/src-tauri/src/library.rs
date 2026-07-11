@@ -23,6 +23,9 @@ const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "bmp", "webp"];
 pub enum MediaKind {
     Video,
     Image,
+    /// HTML / three.js wallpaper: a folder under the library, `file` is the
+    /// entry page.
+    Web,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,43 +78,134 @@ impl Library {
         let source = source
             .canonicalize()
             .map_err(|error| format!("file not found: {error}"))?;
-        if source
+        let extension = source
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("wpk"))
-        {
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+        if extension == "wpk" {
             return self.import_wpk(&source);
+        }
+        // A bare HTML entry: import its whole folder as a web wallpaper.
+        if extension == "html" || extension == "htm" {
+            return self.import_web_folder(&source);
         }
         self.import_media(&source, None, None, None, None)
     }
 
-    /// Unpacks a `.wpk` package and imports its entry, keeping the manifest
-    /// name, author and license.
+    /// Unpacks a `.wpk` package and imports it, keeping the manifest name,
+    /// author and license.
     fn import_wpk(&self, package: &Path) -> Result<LibraryItem, String> {
         let manifest = wpk::read_manifest(package).map_err(|error| error.to_string())?;
+        let package_id = Some(manifest.id.clone()).filter(|id| is_safe_id(id));
         match manifest.media_type {
-            wpk::MediaType::Video | wpk::MediaType::Image => {}
+            wpk::MediaType::Video | wpk::MediaType::Image => {
+                // Unpack just the entry next to the library for the rename-free
+                // single-file import.
+                let staging = self.root.join(".staging");
+                let staged_entry = staging.join(&manifest.entry);
+                wpk::extract_file(package, &manifest.entry, &staged_entry)
+                    .map_err(|error| error.to_string())?;
+                let result = self.import_media(
+                    &staged_entry,
+                    Some(manifest.name.clone()),
+                    Some(manifest.author.clone()),
+                    Some(manifest.license.clone()),
+                    package_id,
+                );
+                let _ = fs::remove_dir_all(&staging);
+                result
+            }
             wpk::MediaType::Web | wpk::MediaType::Model3d => {
-                return Err("web and 3D packages are not supported yet (phase 6)".into());
+                let id = package_id.unwrap_or_else(|| content_id(package).unwrap_or_default());
+                let dir = self.web_item_dir(&id);
+                let mut index = self.load_index()?;
+                if let Some(existing) = index.iter().find(|item| item.id == id) {
+                    return Ok(existing.clone());
+                }
+                let _ = fs::remove_dir_all(&dir);
+                wpk::extract_all(package, &dir).map_err(|error| error.to_string())?;
+                let entry = dir.join(&manifest.entry);
+                if !entry.is_file() {
+                    let _ = fs::remove_dir_all(&dir);
+                    return Err(format!("package entry {} is missing", manifest.entry));
+                }
+                let preview = manifest
+                    .preview
+                    .as_ref()
+                    .map(|p| dir.join(p))
+                    .filter(|p| p.is_file());
+                let item = self.web_item(
+                    id,
+                    manifest.name.clone(),
+                    entry,
+                    preview,
+                    Some(manifest.author.clone()),
+                    Some(manifest.license.clone()),
+                );
+                index.push(item.clone());
+                self.save_index(&index)?;
+                Ok(item)
             }
         }
-        // The package id is the identity across libraries — but it becomes a
-        // file name here, so anything unusual falls back to a content hash.
-        let package_id = Some(manifest.id.clone()).filter(|id| is_safe_id(id));
-        // Unpack next to the library so the rename-free import can read it.
-        let staging = self.root.join(".staging");
-        let staged_entry = staging.join(&manifest.entry);
-        wpk::extract_file(package, &manifest.entry, &staged_entry)
-            .map_err(|error| error.to_string())?;
-        let result = self.import_media(
-            &staged_entry,
-            Some(manifest.name.clone()),
-            Some(manifest.author.clone()),
-            Some(manifest.license.clone()),
-            package_id,
-        );
-        let _ = fs::remove_dir_all(&staging);
-        result
+    }
+
+    /// Imports a bare HTML file by copying its containing folder into the
+    /// library as a web wallpaper. Guards against packaging a huge folder.
+    fn import_web_folder(&self, entry: &Path) -> Result<LibraryItem, String> {
+        let folder = entry.parent().ok_or("HTML file has no parent folder")?;
+        let entry_name = entry
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("bad entry file name")?
+            .to_owned();
+        let id = content_id(entry)?;
+        let dir = self.web_item_dir(&id);
+        let mut index = self.load_index()?;
+        if let Some(existing) = index.iter().find(|item| item.id == id) {
+            return Ok(existing.clone());
+        }
+        let _ = fs::remove_dir_all(&dir);
+        copy_folder_guarded(folder, &dir)?;
+        let name = entry
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("web wallpaper")
+            .to_owned();
+        let item = self.web_item(id, name, dir.join(&entry_name), None, None, None);
+        index.push(item.clone());
+        self.save_index(&index)?;
+        Ok(item)
+    }
+
+    fn web_item_dir(&self, id: &str) -> PathBuf {
+        self.root.join(format!("web-{id}"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn web_item(
+        &self,
+        id: String,
+        name: String,
+        entry: PathBuf,
+        preview: Option<PathBuf>,
+        author: Option<String>,
+        license: Option<String>,
+    ) -> LibraryItem {
+        LibraryItem {
+            id,
+            name,
+            kind: MediaKind::Web,
+            file: entry,
+            preview,
+            imported_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            author,
+            license,
+        }
     }
 
     /// Exports a library item as a `.wpk` package.
@@ -120,7 +214,11 @@ impl Library {
         let item = index
             .iter()
             .find(|item| item.id == id)
-            .ok_or_else(|| format!("library item {id} not found"))?;
+            .ok_or_else(|| format!("library item {id} not found"))?
+            .clone();
+        if item.kind == MediaKind::Web {
+            return self.export_web(&item, target);
+        }
         let entry = item
             .file
             .file_name()
@@ -139,6 +237,7 @@ impl Library {
             media_type: match item.kind {
                 MediaKind::Video => wpk::MediaType::Video,
                 MediaKind::Image => wpk::MediaType::Image,
+                MediaKind::Web => unreachable!("web handled above"),
             },
             entry: entry.clone(),
             name: item.name.clone(),
@@ -152,6 +251,44 @@ impl Library {
         if let (Some(name), Some(path)) = (&preview_name, &item.preview) {
             files.push((name.as_str(), path.as_path()));
         }
+        wpk::write_package(target, &manifest, &files).map_err(|error| error.to_string())
+    }
+
+    /// Packs a web item's whole folder back into a `.wpk`.
+    fn export_web(&self, item: &LibraryItem, target: &Path) -> Result<(), String> {
+        let dir = item
+            .file
+            .parent()
+            .ok_or("web item has no folder")?
+            .to_path_buf();
+        let entry = item
+            .file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("bad entry name")?
+            .to_owned();
+        // Collect every file under the folder as forward-slash archive names.
+        let mut collected: Vec<(String, PathBuf)> = Vec::new();
+        collect_files(&dir, &dir, &mut collected)?;
+        let manifest = wpk::Manifest {
+            id: item.id.clone(),
+            media_type: wpk::MediaType::Web,
+            entry: entry.clone(),
+            name: item.name.clone(),
+            author: item.author.clone().unwrap_or_else(|| "unknown".into()),
+            license: item.license.clone().unwrap_or_else(|| "unknown".into()),
+            version: "1.0".into(),
+            preview: item
+                .preview
+                .as_ref()
+                .and_then(|p| p.strip_prefix(&dir).ok())
+                .map(|p| p.to_string_lossy().replace('\\', "/")),
+            options: serde_json::Map::new(),
+        };
+        let files: Vec<(&str, &Path)> = collected
+            .iter()
+            .map(|(name, path)| (name.as_str(), path.as_path()))
+            .collect();
         wpk::write_package(target, &manifest, &files).map_err(|error| error.to_string())
     }
 
@@ -233,9 +370,19 @@ impl Library {
             return Err(format!("library item {id} not found"));
         };
         let item = index.remove(position);
-        let _ = fs::remove_file(&item.file);
-        if let Some(preview) = &item.preview {
-            let _ = fs::remove_file(preview);
+        if item.kind == MediaKind::Web {
+            // Web items live in their own folder under the library root.
+            if let Some(dir) = item.file.parent()
+                && dir != self.root
+                && dir.starts_with(&self.root)
+            {
+                let _ = fs::remove_dir_all(dir);
+            }
+        } else {
+            let _ = fs::remove_file(&item.file);
+            if let Some(preview) = &item.preview {
+                let _ = fs::remove_file(preview);
+            }
         }
         self.save_index(&index)
     }
@@ -271,6 +418,53 @@ impl Library {
         fs::write(&temporary, json).map_err(|error| error.to_string())?;
         fs::rename(&temporary, self.index_path()).map_err(|error| error.to_string())
     }
+}
+
+/// Caps for packaging or copying a web wallpaper folder.
+const MAX_WEB_FILES: usize = 4096;
+const MAX_WEB_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Recursively copies `from` into `to`, refusing an unexpectedly large folder.
+fn copy_folder_guarded(from: &Path, to: &Path) -> Result<(), String> {
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    collect_files(from, from, &mut files)?;
+    fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    let mut total = 0u64;
+    for (relative, source) in files {
+        let dest = to.join(&relative);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let bytes = fs::copy(&source, &dest).map_err(|e| e.to_string())?;
+        total += bytes;
+        if total > MAX_WEB_BYTES {
+            let _ = fs::remove_dir_all(to);
+            return Err("web folder is too large (over 512 MB)".into());
+        }
+    }
+    Ok(())
+}
+
+/// Collects every file under `root` as `(forward/slash/relative, absolute)`.
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(root, &path, out)?;
+        } else if path.is_file() {
+            if out.len() >= MAX_WEB_FILES {
+                return Err("web folder has too many files".into());
+            }
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((relative, path));
+        }
+    }
+    Ok(())
 }
 
 /// Package ids double as file names; anything beyond this charset is unsafe.
@@ -340,6 +534,8 @@ fn generate_preview(media: &Path, kind: MediaKind, target: &Path) -> Result<(), 
     let seeks: &[&[&str]] = match kind {
         MediaKind::Video => &[&["-ss", "1"], &[]], // short clips: retry at 0s
         MediaKind::Image => &[&[]],
+        // Web previews come from the package manifest, not ffmpeg.
+        MediaKind::Web => return Err("no ffmpeg preview for web".into()),
     };
     let mut last_error = String::new();
     for seek in seeks {
@@ -534,5 +730,43 @@ mod tests {
         fs::write(&odd, "hello").expect("write");
         let error = library.import(&odd).expect_err("txt must be rejected");
         assert!(error.contains("unsupported media type"));
+    }
+
+    #[test]
+    fn web_folder_imports_exports_and_removes() {
+        // No ffmpeg needed for web wallpapers.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let library = Library::at(temp.path().join("library"));
+
+        // A tiny web wallpaper: entry plus a subfolder asset.
+        let site = temp.path().join("aurora");
+        fs::create_dir_all(site.join("assets")).expect("mkdir");
+        fs::write(site.join("index.html"), b"<html><body>hi</body></html>").expect("entry");
+        fs::write(site.join("assets/app.js"), b"console.log(1)").expect("asset");
+
+        let item = library.import(&site.join("index.html")).expect("web import");
+        assert_eq!(item.kind, MediaKind::Web);
+        assert!(item.file.ends_with("index.html"));
+        assert!(item.file.is_file(), "entry copied into the library");
+        // The whole folder came along.
+        assert!(item.file.parent().unwrap().join("assets/app.js").is_file());
+
+        // Export to a package and re-import into a fresh library.
+        let package = temp.path().join("aurora.wpk");
+        library.export(&item.id, &package).expect("export web");
+        let manifest = wpk::read_manifest(&package).expect("valid package");
+        assert_eq!(manifest.media_type, wpk::MediaType::Web);
+        assert_eq!(manifest.entry, "index.html");
+
+        let second = Library::at(temp.path().join("library2"));
+        let restored = second.import(&package).expect("web wpk import");
+        assert_eq!(restored.kind, MediaKind::Web);
+        assert!(restored.file.parent().unwrap().join("assets/app.js").is_file());
+
+        // Removal deletes the whole web folder.
+        let dir = item.file.parent().unwrap().to_path_buf();
+        library.remove(&item.id).expect("remove");
+        assert!(!dir.exists(), "web folder deleted");
+        assert!(library.list().expect("list").is_empty());
     }
 }

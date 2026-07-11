@@ -114,6 +114,48 @@ pub fn extract_file(package: &Path, member: &str, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Total members and combined size caps for a full package extraction.
+const MAX_PACKAGE_FILES: usize = 4096;
+const MAX_PACKAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Extracts every member of the package into `target_dir`, preserving the
+/// archive's layout. Member names are validated (no traversal), and both the
+/// file count and combined size are capped against hostile archives.
+pub fn extract_all(package: &Path, target_dir: &Path) -> Result<()> {
+    let mut archive = ZipArchive::new(File::open(package)?)?;
+    std::fs::create_dir_all(target_dir)?;
+    let mut files = 0usize;
+    let mut total = 0u64;
+    for index in 0..archive.len() {
+        let mut member = archive.by_index(index)?;
+        let name = member.name().to_owned();
+        if name.ends_with('/') {
+            continue; // directory entry
+        }
+        ensure_safe_name(&name)?;
+        files += 1;
+        if files > MAX_PACKAGE_FILES {
+            return Err(WpkError::TooLarge {
+                name: "<package>".into(),
+                limit: MAX_PACKAGE_FILES as u64,
+            });
+        }
+        let dest = target_dir.join(&name);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut output = File::create(&dest)?;
+        total += copy_capped(&mut member, &mut output, MAX_FILE_BYTES, &name)?;
+        if total > MAX_PACKAGE_BYTES {
+            return Err(WpkError::TooLarge {
+                name: "<package>".into(),
+                limit: MAX_PACKAGE_BYTES,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Writes a package: the manifest plus `(archive_name, source_path)` files.
 pub fn write_package(target: &Path, manifest: &Manifest, files: &[(&str, &Path)]) -> Result<()> {
     validate_manifest(manifest)?;
@@ -188,14 +230,14 @@ fn read_capped(reader: &mut impl Read, limit: u64, name: &str) -> Result<Vec<u8>
     Ok(bytes)
 }
 
-/// Copies at most `limit` bytes from `reader` to `writer`; errors if the
-/// stream has more (zip-bomb guard by actual output, not the header value).
+/// Copies at most `limit` bytes from `reader` to `writer`, returning the count;
+/// errors if the stream has more (zip-bomb guard by actual output).
 fn copy_capped(
     reader: &mut impl Read,
     writer: &mut impl Write,
     limit: u64,
     name: &str,
-) -> Result<()> {
+) -> Result<u64> {
     let copied = std::io::copy(&mut reader.take(limit + 1), writer)?;
     if copied > limit {
         return Err(WpkError::TooLarge {
@@ -203,7 +245,7 @@ fn copy_capped(
             limit,
         });
     }
-    Ok(())
+    Ok(copied)
 }
 
 /// Flat, relative, forward-slash names only — no traversal, no drives.
@@ -305,6 +347,44 @@ mod tests {
             );
         }
         assert!(ensure_safe_name("folder/wall.mp4").is_ok());
+    }
+
+    #[test]
+    fn extract_all_unpacks_the_whole_package_safely() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        // A web package: entry plus an asset in a subdirectory.
+        let entry = temp.path().join("index.html");
+        std::fs::write(&entry, b"<html></html>").expect("write entry");
+        let asset_dir = temp.path().join("assets");
+        std::fs::create_dir_all(&asset_dir).expect("mkdir");
+        let asset = asset_dir.join("app.js");
+        std::fs::write(&asset, b"console.log(1)").expect("write asset");
+
+        let mut manifest = sample_manifest();
+        manifest.media_type = MediaType::Web;
+        manifest.entry = "index.html".into();
+        manifest.preview = None;
+        let package = temp.path().join("site.wpk");
+        write_package(
+            &package,
+            &manifest,
+            &[
+                ("index.html", entry.as_path()),
+                ("assets/app.js", asset.as_path()),
+            ],
+        )
+        .expect("write package");
+
+        let out = temp.path().join("unpacked");
+        extract_all(&package, &out).expect("extract all");
+        assert_eq!(
+            std::fs::read(out.join("index.html")).expect("entry"),
+            b"<html></html>"
+        );
+        assert_eq!(
+            std::fs::read(out.join("assets/app.js")).expect("asset"),
+            b"console.log(1)"
+        );
     }
 
     #[test]
