@@ -10,7 +10,8 @@ const HEX64 = /^[0-9a-fA-F]{64}$/;
 const GITHUB_URL = /^https:\/\/(github\.com|raw\.githubusercontent\.com)\//;
 const SLUG = /^[a-z0-9-]+$/;
 const MAX_TEXT = 80;
-const MAX_PACK_BYTES = 512 * 1024 * 1024;
+// Packs are served from the repo, so keep them small to avoid bloating git.
+const MAX_PACK_BYTES = 32 * 1024 * 1024;
 
 function fail(message) {
   console.error("✗ " + message);

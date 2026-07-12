@@ -10,3 +10,7 @@
 *.png binary
 *.webp binary
 *.glb binary
+
+# Generated/tooling text stays LF so the CI catalog drift-check is stable.
+gallery/catalog.json text eol=lf
+gallery/*.mjs text eol=lf

@@ -15,44 +15,36 @@
 
 ## Как добавить свой пак
 
-1. **Соберите `.wpk`** из видео/картинки одной командой — она сразу печатает
-   SHA-256, размер и готовую запись каталога:
+Паки хранятся прямо в репозитории под `gallery/packs/<id>/` и раздаются по
+`raw.githubusercontent` — Release для маленьких паков не нужен. Каталог
+**генерируется** из паков, руками его не редактируют.
+
+1. **Соберите `.wpk`** из видео/картинки сразу в папку пака (команда печатает
+   SHA-256 и размер):
 
    ```
-   cargo run -p renderer -- pack wall.mp4 --name "Aurora Drift" --author "2fame" --license "CC-BY-4.0" --preview preview.jpg
+   cargo run -p renderer -- pack wall.mp4 --name "Aurora Drift" --author "2fame" --license "CC0-1.0" --id aurora-drift --preview preview.jpg -o gallery/packs/aurora-drift/aurora-drift.wpk
    ```
 
    (Или экспортом из приложения — кнопка «Поделиться .wpk» на карточке.)
-2. **Захостьте `.wpk`**: приложите его к **GitHub Release** этого репозитория
-   (или своего форка) — тогда `download_url` будет вида
-   `https://github.com/.../releases/download/<tag>/<file>.wpk`.
-3. **Добавьте запись** из шага 1 в `gallery/catalog.json` (подставив реальный
-   `download_url`) и положите превью в `gallery/packs/<id>/preview.jpg`.
-4. **Откройте Pull Request.** Пройдут автопроверки (`validate.mjs` — структура,
-   `verify-downloads.mjs` — совпадение SHA-256 с файлом), затем ревью — и после
-   мержа пак появится в каталоге у всех.
+2. **Положите превью** `gallery/packs/aurora-drift/preview.jpg` (опц.) и теги
+   `gallery/packs/aurora-drift/tags.json` — массив строк (опц.).
+3. **Сгенерируйте каталог** — SHA-256 и размер посчитаются сами:
 
-## Формат записи каталога
+   ```
+   node gallery/build-catalog.mjs
+   ```
+4. **Откройте Pull Request.** CI проверит, что каталог сгенерирован из паков
+   (drift-check), и прогонит `validate.mjs` (структура/политика: только
+   video/image, ≤ 32 МБ, корректные поля). После ревью и мержа пак появится
+   в каталоге у всех.
 
-```json
-{
-  "id": "aurora-drift",
-  "name": "Aurora Drift",
-  "author": "2fame",
-  "type": "video",
-  "license": "CC-BY-4.0",
-  "sha256": "<64 hex>",
-  "size": 12345678,
-  "preview": "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/packs/aurora-drift/preview.jpg",
-  "download_url": "https://github.com/sweety1lime/LimeWall-Gallery/releases/download/aurora-drift/aurora-drift.wpk",
-  "tags": ["abstract", "green"]
-}
-```
-
-Проверить локально перед PR: `node gallery/validate.mjs`.
+Проверить локально перед PR: `node gallery/build-catalog.mjs && node gallery/validate.mjs`.
 
 ## Безопасность
 
 Скачанный пак приложение проверяет по **SHA-256** из каталога перед установкой, и
-качает только с `github.com` / `raw.githubusercontent.com`. Отзыв пака —
-удаление Release + запись в revocation-list. Подробнее: `docs/research/workshop.md`.
+качает только с `github.com` / `raw.githubusercontent.com`. SHA-256 в каталоге
+считается из самого файла (генератором), так что подделать запись нельзя. Отзыв
+пака — удаление файла/записи (и revocation-list). Подробнее:
+`docs/research/workshop.md`.
