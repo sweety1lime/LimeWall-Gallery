@@ -8,6 +8,9 @@ const REQUIRED = ["id", "name", "author", "type", "license", "sha256", "size", "
 const ALLOWED_TYPES = ["video", "image"]; // v1: media only — code (web/3D) is not accepted yet
 const HEX64 = /^[0-9a-fA-F]{64}$/;
 const GITHUB_URL = /^https:\/\/(github\.com|raw\.githubusercontent\.com)\//;
+const SLUG = /^[a-z0-9-]+$/;
+const MAX_TEXT = 80;
+const MAX_PACK_BYTES = 512 * 1024 * 1024;
 
 function fail(message) {
   console.error("✗ " + message);
@@ -43,8 +46,22 @@ for (const [i, pack] of catalog.packs.entries()) {
   if (pack.download_url && !GITHUB_URL.test(pack.download_url)) {
     fail(`${where}: download_url должен вести на github.com или raw.githubusercontent.com`);
   }
-  if (typeof pack.size !== "number" || pack.size <= 0) {
-    fail(`${where}: size должен быть положительным числом байт`);
+  if (pack.preview !== undefined && !GITHUB_URL.test(pack.preview)) {
+    fail(`${where}: preview должен вести на github.com или raw.githubusercontent.com`);
+  }
+  if (typeof pack.size !== "number" || pack.size <= 0 || pack.size > MAX_PACK_BYTES) {
+    fail(`${where}: size должен быть 1..${MAX_PACK_BYTES} байт`);
+  }
+  if (pack.id && !SLUG.test(pack.id)) {
+    fail(`${where}: id должен быть slug (строчные латинские буквы, цифры, дефис)`);
+  }
+  for (const field of ["name", "author"]) {
+    if (typeof pack[field] === "string" && pack[field].length > MAX_TEXT) {
+      fail(`${where}: ${field} длиннее ${MAX_TEXT} символов`);
+    }
+  }
+  if (pack.tags !== undefined && !Array.isArray(pack.tags)) {
+    fail(`${where}: tags должен быть массивом`);
   }
   if (pack.id) {
     if (ids.has(pack.id)) fail(`${where}: повторяющийся id`);
