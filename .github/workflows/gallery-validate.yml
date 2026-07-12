@@ -21,3 +21,6 @@ jobs:
           node-version: "20"
       - name: Validate catalog.json
         run: node gallery/validate.mjs
+      - name: Verify pack downloads (checksums)
+        if: github.event_name == 'pull_request'
+        run: node gallery/verify-downloads.mjs
