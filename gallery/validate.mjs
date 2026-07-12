@@ -70,8 +70,43 @@ for (const [i, pack] of catalog.packs.entries()) {
   }
 }
 
+// --- revocation list -------------------------------------------------------
+// A revoked pack must be *removed* from the repo (so the catalog no longer
+// carries it) and its id recorded here, which pulls it from anyone who already
+// installed it. So the invariant is: nothing in the catalog is also revoked.
+let revocation;
+try {
+  revocation = JSON.parse(readFileSync(new URL("./revocation.json", import.meta.url), "utf8"));
+} catch (error) {
+  fail("revocation.json не парсится: " + error.message);
+  revocation = { version: 1, revoked: [] };
+}
+
+if (revocation.version !== 1) fail("revocation.version должно быть 1");
+if (!Array.isArray(revocation.revoked)) {
+  fail("revocation.revoked должен быть массивом");
+  revocation.revoked = [];
+}
+
+const revokedIds = new Set();
+for (const [i, entry] of revocation.revoked.entries()) {
+  const where = `revoked #${i} (${entry.id ?? "?"})`;
+  if (!entry.id || !SLUG.test(entry.id)) fail(`${where}: id должен быть slug`);
+  if (entry.sha256 !== undefined && !HEX64.test(entry.sha256)) {
+    fail(`${where}: sha256 должен быть 64 hex-символа`);
+  }
+  if (entry.id) {
+    if (ids.has(entry.id)) {
+      fail(`${where}: пак ещё в каталоге — удалите gallery/packs/${entry.id}/ и пересоберите каталог`);
+    }
+    revokedIds.add(entry.id);
+  }
+}
+
 if (process.exitCode) {
   console.error("\nВалидация каталога не прошла.");
 } else {
-  console.log(`✓ Каталог валиден: ${catalog.packs.length} пак(ов).`);
+  console.log(
+    `✓ Каталог валиден: ${catalog.packs.length} пак(ов), ${revokedIds.size} отозвано.`,
+  );
 }

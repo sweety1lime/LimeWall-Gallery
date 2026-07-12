@@ -69,6 +69,12 @@ interface GalleryPack {
   tags: string[];
 }
 
+interface CatalogView {
+  packs: GalleryPack[];
+  // Library items a revocation just pulled (names), so we can tell the user.
+  removed: string[];
+}
+
 interface DaemonStatus {
   sessions: SessionStatus[];
   stack_cpu_percent: number | null;
@@ -356,6 +362,8 @@ async function connect() {
     }
     renderContent();
     if (settingsOpen) renderSettings();
+    // Kill-switch check runs in the background so it never delays the UI.
+    void applyRevocationsAtStartup();
   } catch {
     setDisconnected();
     report("Не удалось запустить фоновый плеер. Нажмите «Подключить», чтобы повторить.", true);
@@ -463,13 +471,35 @@ function openGallery() {
   void loadGallery();
 }
 
+// A revocation pulled one or more wallpapers out of the library — tell the user
+// prominently and refresh so the cards disappear.
+async function notifyRevoked(names: string[]) {
+  if (!names.length) return;
+  report(`Отозваны небезопасные обои: ${names.join(", ")} — удалены из библиотеки`, true);
+  await refreshLibrary();
+}
+
+// Best-effort kill-switch at startup: pull any revoked wallpaper even if the
+// user never opens the gallery. Only reaches the network when the user actually
+// has gallery-sourced content that could be revoked — no phone-home otherwise.
+async function applyRevocationsAtStartup() {
+  if (galleryVerified.size === 0) return;
+  try {
+    await notifyRevoked(await invoke<string[]>("gallery_apply_revocations"));
+  } catch {
+    // offline or no revocation list — revocation is best-effort, ignore.
+  }
+}
+
 async function loadGallery() {
   galleryLoading = true;
   galleryError = null;
   renderContent();
   try {
-    galleryPacks = await invoke<GalleryPack[]>("gallery_fetch_catalog");
+    const view = await invoke<CatalogView>("gallery_fetch_catalog");
+    galleryPacks = view.packs;
     localStorage.setItem("lw-catalog-cache", JSON.stringify(galleryPacks));
+    await notifyRevoked(view.removed);
   } catch {
     // Keep the cached catalog if we have one; only hard-fail when empty.
     if (galleryPacks.length === 0) {

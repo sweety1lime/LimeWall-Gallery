@@ -423,6 +423,7 @@ pub fn run() {
             playlist_next,
             gallery::gallery_fetch_catalog,
             gallery::gallery_download,
+            gallery::gallery_apply_revocations,
         ])
         .setup(|app| {
             // Double-clicking a .wpk should land here (per-user, no admin).

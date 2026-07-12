@@ -3,7 +3,15 @@
 //! catalog entry, and hand it to the existing library import. v1 has no
 //! signature (HTTPS + SHA-256 + PR moderation); offline signing is a later
 //! hardening step (see docs/research/workshop.md).
+//!
+//! A published pack can also be **revoked**: `revocation.json` lists ids (and
+//! optional file hashes) that must never be installed and should be pulled from
+//! anyone who already has them. The client filters revoked packs out of the
+//! catalog, refuses to download them, and sweeps them out of the library. This
+//! is a best-effort kill-switch — if the revocation list is unreachable we fail
+//! open (the gallery keeps working) rather than blocking the whole app.
 
+use std::collections::HashSet;
 use std::io::Read;
 
 use serde::{Deserialize, Serialize};
@@ -13,8 +21,13 @@ use crate::library;
 /// Where the catalog lives. Overridable for local testing.
 const CATALOG_URL: &str =
     "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/catalog.json";
+/// Where the revocation list lives. Overridable for local testing.
+const REVOCATION_URL: &str =
+    "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/revocation.json";
 /// Catalogs above this are rejected as hostile.
 const MAX_CATALOG_BYTES: u64 = 4 * 1024 * 1024;
+/// The revocation list is tiny; anything larger is bogus.
+const MAX_REVOCATION_BYTES: u64 = 1024 * 1024;
 /// Per-pack download cap (mirrors the web-folder limit in `library`).
 const MAX_PACK_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -43,8 +56,35 @@ struct Catalog {
     packs: Vec<GalleryPack>,
 }
 
+/// One revoked pack. `id` matches the library item id (and the catalog id);
+/// `sha256`, when present, additionally blocks any `.wpk` with that file hash.
+#[derive(Debug, Clone, Deserialize)]
+struct RevocationEntry {
+    id: String,
+    #[serde(default)]
+    sha256: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Revocation {
+    #[serde(default)]
+    revoked: Vec<RevocationEntry>,
+}
+
+/// The catalog the panel shows, plus any library items a revocation removed on
+/// this fetch (so the UI can tell the user what was pulled).
+#[derive(Debug, Default, Serialize)]
+pub struct CatalogView {
+    packs: Vec<GalleryPack>,
+    removed: Vec<String>,
+}
+
 fn catalog_url() -> String {
     std::env::var("LIMEWALL_CATALOG_URL").unwrap_or_else(|_| CATALOG_URL.to_owned())
+}
+
+fn revocation_url() -> String {
+    std::env::var("LIMEWALL_REVOCATION_URL").unwrap_or_else(|_| REVOCATION_URL.to_owned())
 }
 
 /// Only our own GitHub-hosted files may be fetched, so a tampered catalog can't
@@ -91,15 +131,119 @@ fn parse_catalog(body: &str) -> Result<Vec<GalleryPack>, String> {
     Ok(catalog.packs)
 }
 
-/// Downloads and parses the gallery catalog.
+fn parse_revocation(body: &str) -> Result<Revocation, String> {
+    serde_json::from_str(body).map_err(|error| format!("некорректный список отзыва: {error}"))
+}
+
+/// Fetches the revocation list, failing open: any network/parse error yields an
+/// empty list so a hiccup never blocks the gallery. The trade-off (an attacker
+/// who can suppress this file delays revocation) is inherent to online revocation
+/// and documented in docs/research/workshop.md.
+fn fetch_revocation() -> Revocation {
+    match http_get_bytes(&revocation_url(), MAX_REVOCATION_BYTES) {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map_err(|error| error.to_string())
+            .and_then(|body| parse_revocation(&body))
+            .unwrap_or_default(),
+        Err(_) => Revocation::default(),
+    }
+}
+
+/// Ids that must not be installed. Both the pack id and any listed file hash are
+/// treated as ids so a revoked-by-hash pack still matches a catalog entry.
+fn revoked_ids(revocation: &Revocation) -> HashSet<String> {
+    revocation
+        .revoked
+        .iter()
+        .map(|entry| entry.id.to_ascii_lowercase())
+        .collect()
+}
+
+/// Lowercase file hashes flagged for revocation.
+fn revoked_hashes(revocation: &Revocation) -> HashSet<String> {
+    revocation
+        .revoked
+        .iter()
+        .filter_map(|entry| entry.sha256.as_deref())
+        .map(|hash| hash.trim().to_ascii_lowercase())
+        .collect()
+}
+
+/// Drops any catalog pack whose id or file hash has been revoked.
+fn filter_packs(packs: Vec<GalleryPack>, revocation: &Revocation) -> Vec<GalleryPack> {
+    let ids = revoked_ids(revocation);
+    let hashes = revoked_hashes(revocation);
+    packs
+        .into_iter()
+        .filter(|pack| {
+            !ids.contains(&pack.id.to_ascii_lowercase())
+                && !hashes.contains(&pack.sha256.trim().to_ascii_lowercase())
+        })
+        .collect()
+}
+
+/// True if this pack is revoked (used to refuse a download of a stale entry).
+fn is_revoked(pack: &GalleryPack, revocation: &Revocation) -> bool {
+    revoked_ids(revocation).contains(&pack.id.to_ascii_lowercase())
+        || revoked_hashes(revocation).contains(&pack.sha256.trim().to_ascii_lowercase())
+}
+
+/// Removes any library item whose id was revoked and returns the removed items
+/// (so their names can be shown and their now-playing sessions stopped). Only
+/// gallery packs carry slug ids that match a revocation entry, so a user's own
+/// content-hashed imports are never touched.
+fn sweep_library(revocation: &Revocation) -> Result<Vec<library::LibraryItem>, String> {
+    let ids = revoked_ids(revocation);
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let library = library::Library::default_location()?;
+    let mut removed = Vec::new();
+    for item in library.list()? {
+        if ids.contains(&item.id.to_ascii_lowercase()) {
+            match library.remove(&item.id) {
+                Ok(()) => removed.push(item),
+                Err(error) => eprintln!("revocation: could not remove {}: {error}", item.id),
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Applies a revocation: sweeps the library and stops any wallpaper still
+/// playing a file that was just removed. Returns the removed items' names.
+fn apply_revocation(revocation: &Revocation) -> Result<Vec<String>, String> {
+    let removed = sweep_library(revocation)?;
+    let paths: Vec<_> = removed.iter().map(|item| item.file.clone()).collect();
+    crate::daemon_client::stop_sessions_playing(&paths);
+    Ok(removed.into_iter().map(|item| item.name).collect())
+}
+
+/// Downloads and parses the gallery catalog, applying the revocation list:
+/// revoked packs are dropped from the returned catalog and swept out of the
+/// library. `removed` names anything a revocation just pulled locally.
 #[tauri::command]
-pub async fn gallery_fetch_catalog() -> Result<Vec<GalleryPack>, String> {
+pub async fn gallery_fetch_catalog() -> Result<CatalogView, String> {
     crate::blocking(|| {
         let bytes = http_get_bytes(&catalog_url(), MAX_CATALOG_BYTES)?;
         let body = String::from_utf8(bytes).map_err(|error| error.to_string())?;
-        parse_catalog(&body)
+        let packs = parse_catalog(&body)?;
+        let revocation = fetch_revocation();
+        let removed = apply_revocation(&revocation).unwrap_or_default();
+        Ok(CatalogView {
+            packs: filter_packs(packs, &revocation),
+            removed,
+        })
     })
     .await
+}
+
+/// Fetches the revocation list and pulls any revoked wallpaper out of the
+/// library, returning the removed items' names. Run at startup so the
+/// kill-switch works even if the user never opens the gallery.
+#[tauri::command]
+pub async fn gallery_apply_revocations() -> Result<Vec<String>, String> {
+    crate::blocking(|| apply_revocation(&fetch_revocation())).await
 }
 
 /// Downloads a pack, verifies its SHA-256 against the catalog entry, and imports
@@ -108,6 +252,11 @@ pub async fn gallery_fetch_catalog() -> Result<Vec<GalleryPack>, String> {
 #[tauri::command]
 pub async fn gallery_download(pack: GalleryPack) -> Result<library::LibraryItem, String> {
     crate::blocking(move || {
+        // A cached catalog on the panel could still offer a since-revoked pack;
+        // re-check before installing.
+        if is_revoked(&pack, &fetch_revocation()) {
+            return Err(format!("«{}» отозван и не может быть установлен", pack.name));
+        }
         let bytes = http_get_bytes(&pack.download_url, MAX_PACK_BYTES)?;
         let actual = sha256_hex(&bytes);
         if !actual.eq_ignore_ascii_case(pack.sha256.trim()) {
@@ -183,5 +332,56 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    fn pack(id: &str, sha: &str) -> GalleryPack {
+        GalleryPack {
+            id: id.into(),
+            name: id.into(),
+            author: "2fame".into(),
+            kind: "video".into(),
+            license: "CC0-1.0".into(),
+            sha256: sha.into(),
+            size: 10,
+            preview: None,
+            download_url: "https://github.com/x/y/a.wpk".into(),
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn revocation_parses_and_defaults_to_empty() {
+        assert!(parse_revocation(r#"{"version":1,"revoked":[]}"#).unwrap().revoked.is_empty());
+        // A missing `revoked` array (or an unknown extra field) still parses.
+        assert!(parse_revocation(r#"{"version":1}"#).unwrap().revoked.is_empty());
+    }
+
+    #[test]
+    fn filter_drops_revoked_by_id_and_hash_keeps_others() {
+        let packs = vec![pack("good", "AA"), pack("bad-id", "BB"), pack("bad-hash", "CC")];
+        let revocation = parse_revocation(
+            r#"{"version":1,"revoked":[
+                {"id":"bad-id"},
+                {"id":"other","sha256":"cc"}
+            ]}"#,
+        )
+        .unwrap();
+        let kept = filter_packs(packs, &revocation);
+        let ids: Vec<_> = kept.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["good"]); // revoked by id and by (case-insensitive) hash removed
+    }
+
+    #[test]
+    fn is_revoked_matches_id_case_insensitively() {
+        let revocation =
+            parse_revocation(r#"{"version":1,"revoked":[{"id":"Bad-Pack"}]}"#).unwrap();
+        assert!(is_revoked(&pack("bad-pack", "AA"), &revocation));
+        assert!(!is_revoked(&pack("good", "AA"), &revocation));
+    }
+
+    #[test]
+    fn no_revocations_means_no_ids() {
+        assert!(revoked_ids(&Revocation::default()).is_empty());
+        assert!(revoked_hashes(&Revocation::default()).is_empty());
     }
 }

@@ -25,6 +25,35 @@ pub fn request(endpoint: &str, command: ipc::Command) -> Result<ipc::ResponseDat
     }
 }
 
+/// Best-effort: stops any monitor currently playing one of these files. Used by
+/// gallery revocation to yank a wallpaper the moment it is pulled, without
+/// waiting for the next daemon restart. Silent on any error — the file is
+/// already gone from the library, so this is a courtesy stop.
+pub(crate) fn stop_sessions_playing(paths: &[PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+    let endpoint = endpoint();
+    let Ok(ipc::ResponseData::Status { sessions, .. }) = request(&endpoint, ipc::Command::Status)
+    else {
+        return;
+    };
+    for session in sessions {
+        let hit = session
+            .path
+            .as_deref()
+            .is_some_and(|playing| paths.iter().any(|p| p.as_path() == playing));
+        if hit {
+            let _ = request(
+                &endpoint,
+                ipc::Command::Stop {
+                    monitor: Some(session.monitor),
+                },
+            );
+        }
+    }
+}
+
 /// Pings the daemon; when it is not running, starts one detached and waits
 /// for it to come up. Returns the daemon version.
 pub fn ensure_daemon(endpoint: &str) -> Result<String, String> {
