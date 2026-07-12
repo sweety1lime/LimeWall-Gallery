@@ -12,11 +12,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::playback;
+use crate::playlist;
 
 /// Upper bound on connection threads; above it clients get a busy error.
 const MAX_CONNECTIONS: usize = 16;
@@ -40,6 +42,8 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
 
     let (message_tx, message_rx) = mpsc::channel::<Message>();
     let request_tx = message_tx.clone();
+    #[cfg(windows)]
+    let watchdog_tx = message_tx.clone();
     std::thread::Builder::new()
         .name("ipc-accept".into())
         .spawn(move || accept_loop(&server, &request_tx))
@@ -48,7 +52,7 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
     // The tray belongs to the daemon so it works while the UI is closed.
     // Headless operation (e.g. CI) is fine — just log and continue.
     let message_tx_watcher = message_tx.clone();
-    let _tray = match platform::tray::spawn("LimeWall", move |event| {
+    let tray = match platform::tray::spawn("LimeWall", move |event| {
         let _ = message_tx.send(Message::Tray(event));
     }) {
         Ok(guard) => Some(guard),
@@ -70,6 +74,15 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
         }
     };
 
+    // Resource watchdog: pause a wallpaper whose process tree pegs the CPU.
+    #[cfg(windows)]
+    if let Err(error) = std::thread::Builder::new()
+        .name("watchdog".into())
+        .spawn(move || run_watchdog(watchdog_tx))
+    {
+        eprintln!("resource watchdog disabled: {error}");
+    }
+
     let mut state = DaemonState {
         host,
         api: None,
@@ -79,14 +92,21 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
         politeness: Politeness::default(),
         battery_policy: ipc::BatteryPolicy::Pause,
         battery_eco_active: false,
+        last_cpu: None,
+        playlists: HashMap::new(),
     };
     // Wallpapers applied before the last shutdown come back on their own;
     // clients connecting meanwhile just queue in the request channel.
     state.restore_state();
-    // Ends when every sender is gone (accept loop died) or on shutdown.
-    for message in message_rx {
-        match message {
-            Message::Request(envelope) => {
+    // Ends on shutdown or channel disconnect. Playlist rotations fire on their
+    // own schedule via the recv timeout — no dedicated thread. `tick_playlists`
+    // runs after every wake (not just on timeout), because the watchdog's 4 s
+    // CpuSample messages would otherwise always preempt the timeout arm.
+    let mut last_tip = String::new();
+    loop {
+        let timeout = state.next_wakeup();
+        match message_rx.recv_timeout(timeout) {
+            Ok(Message::Request(envelope)) => {
                 let shutdown = matches!(envelope.request.command, ipc::Command::Shutdown);
                 let response = state.handle(envelope.request);
                 let ok = matches!(response.body, ipc::ResponseBody::Success { .. });
@@ -95,13 +115,29 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
                     break;
                 }
             }
-            Message::Tray(event) => {
+            Ok(Message::Tray(event)) => {
                 if state.handle_tray(event) {
                     break;
                 }
             }
-            Message::Activity(event) => state.handle_activity(event),
+            Ok(Message::Activity(event)) => state.handle_activity(event),
+            Ok(Message::ResourcePressure(percent)) => state.handle_resource_pressure(percent),
+            Ok(Message::CpuSample(percent)) => {
+                state.last_cpu = Some((percent, Instant::now()));
+                if let Some(tray) = &tray {
+                    // Surface load without opening the window; only touch the
+                    // icon when the text actually changes (not every 4 s).
+                    let tip = state.tray_tooltip(percent);
+                    if tip != last_tip {
+                        tray.set_tooltip(&tip);
+                        last_tip = tip;
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        state.tick_playlists(Instant::now());
     }
     // Shutdown intentionally leaves the state file alone: these wallpapers
     // are meant to come back on the next start.
@@ -115,6 +151,12 @@ enum Message {
     Request(Envelope),
     Tray(platform::tray::TrayEvent),
     Activity(platform::watcher::ActivityEvent),
+    /// Sustained CPU pressure from the wallpaper stack (percent of the whole
+    /// machine), raised by the resource watchdog thread.
+    ResourcePressure(f32),
+    /// Latest wallpaper-stack CPU reading (percent of the whole machine), for
+    /// display; sent by the watchdog every sample.
+    CpuSample(f32),
 }
 
 /// %APPDATA%/LimeWall/wallpapers.json (shared convention with the UI library
@@ -240,6 +282,8 @@ struct Session {
     user_paused: bool,
     /// Pause currently applied (user intent or politeness).
     effective_paused: bool,
+    /// Latched by the resource watchdog; cleared when the user resumes.
+    overbudget: bool,
     monitor: platform::MonitorInfo,
 }
 
@@ -273,9 +317,87 @@ impl Politeness {
 }
 
 /// Effective pause for one monitor: the user's own pause, a fullscreen app on
-/// that monitor, or any system-wide reason. Pure so it can be tested directly.
-fn desired_pause(user_paused: bool, fullscreen: bool, global_pause: bool) -> bool {
-    user_paused || fullscreen || global_pause
+/// that monitor, any system-wide reason, or the resource watchdog latching a
+/// runaway wallpaper. Pure so it can be tested directly.
+fn desired_pause(
+    user_paused: bool,
+    fullscreen: bool,
+    global_pause: bool,
+    overbudget: bool,
+) -> bool {
+    user_paused || fullscreen || global_pause || overbudget
+}
+
+/// Resource watchdog tuning. A wallpaper is decoration; sustained use of a
+/// meaningful slice of the whole machine means a runaway or hostile page. These
+/// defaults are deliberately conservative to avoid false pauses and want live
+/// tuning against real hardware (see docs/research/security-model.md).
+#[cfg(any(windows, test))]
+const CPU_BUDGET_PERCENT: f32 = 25.0; // percent of total machine capacity
+#[cfg(any(windows, test))]
+const BREACH_SAMPLES: u32 = 5; // consecutive over-budget samples before acting
+#[cfg(windows)]
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(4);
+
+/// A CPU reading older than this is stale (watchdog thread wedged / stopped) and
+/// is not reported to clients. Kept cross-platform (`WATCHDOG_INTERVAL` is
+/// Windows-only).
+const CPU_SAMPLE_FRESH: Duration = Duration::from_secs(15);
+
+/// The freshest CPU sample still considered live, rounded to 0.1%. Pure for tests.
+fn fresh_cpu(sample: Option<(f32, Instant)>, now: Instant) -> Option<f32> {
+    sample
+        .filter(|(_, at)| now.duration_since(*at) < CPU_SAMPLE_FRESH)
+        .map(|(percent, _)| (percent * 10.0).round() / 10.0)
+}
+
+/// Turns a stream of CPU% samples into a single "pause it" signal, with
+/// hysteresis so a paused-then-recovered wallpaper does not flap.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct BreachDetector {
+    over: u32,
+    fired: bool,
+}
+
+#[cfg(any(windows, test))]
+impl BreachDetector {
+    /// Feeds one CPU% sample; returns true exactly once when a sustained breach
+    /// first appears, and rearms only after CPU falls back under budget.
+    fn observe(&mut self, percent: f32) -> bool {
+        if percent >= CPU_BUDGET_PERCENT {
+            self.over = self.over.saturating_add(1);
+            if self.over >= BREACH_SAMPLES && !self.fired {
+                self.fired = true;
+                return true;
+            }
+        } else {
+            self.over = 0;
+            self.fired = false;
+        }
+        false
+    }
+}
+
+/// Samples the wallpaper stack's CPU and asks the daemon to pause a wallpaper
+/// on sustained pressure. Ends when the daemon's receiver is gone.
+#[cfg(windows)]
+fn run_watchdog(tx: mpsc::Sender<Message>) {
+    let mut sampler = platform::resources::StackSampler::new();
+    let mut detector = BreachDetector::default();
+    loop {
+        std::thread::sleep(WATCHDOG_INTERVAL);
+        let Some(percent) = sampler.sample() else {
+            continue;
+        };
+        // Feed the live reading for display, then the breach detector.
+        if tx.send(Message::CpuSample(percent)).is_err() {
+            break; // daemon gone
+        }
+        if detector.observe(percent) && tx.send(Message::ResourcePressure(percent)).is_err() {
+            break;
+        }
+    }
 }
 
 struct DaemonState {
@@ -291,6 +413,26 @@ struct DaemonState {
     battery_policy: ipc::BatteryPolicy,
     /// Sessions currently downgraded to Eco because of the battery policy.
     battery_eco_active: bool,
+    /// Latest wallpaper-stack CPU reading from the watchdog, for `status`.
+    last_cpu: Option<(f32, Instant)>,
+    /// Per-monitor auto-rotating playlists.
+    playlists: HashMap<ipc::MonitorId, PlaylistState>,
+}
+
+/// A monitor's running playlist: its items, timing and rotation state.
+struct PlaylistState {
+    /// Device name, for persistence across topology changes.
+    monitor_name: String,
+    items: Vec<PathBuf>,
+    interval: Duration,
+    /// Kept alongside `interval` for persistence and the status summary.
+    interval_minutes: u32,
+    shuffle: bool,
+    rotation: playlist::Rotation,
+    next_rotate_at: Instant,
+    quality: ipc::Quality,
+    volume: u8,
+    anime4k: bool,
 }
 
 /// One entry of the persisted wallpaper state.
@@ -313,10 +455,46 @@ struct PersistedState {
     #[serde(default = "default_battery_policy")]
     on_battery: ipc::BatteryPolicy,
     wallpapers: Vec<PersistedSession>,
+    /// Playlists; absent in files from builds before the feature (kept
+    /// separate from `wallpapers` so an older daemon still restores the current
+    /// wallpaper as a static one — a graceful downgrade).
+    #[serde(default)]
+    playlists: Vec<PersistedPlaylist>,
+}
+
+/// One persisted playlist entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedPlaylist {
+    monitor: ipc::MonitorId,
+    monitor_name: String,
+    items: Vec<PathBuf>,
+    interval_minutes: u32,
+    shuffle: bool,
+    /// Item index showing at save time, resumed on restore.
+    position: usize,
+    quality: ipc::Quality,
+    volume: u8,
+    anime4k: bool,
 }
 
 fn default_battery_policy() -> ipc::BatteryPolicy {
     ipc::BatteryPolicy::Pause
+}
+
+/// A time-derived non-zero seed for playlist shuffles.
+fn seed_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64 | 1)
+        .unwrap_or(0x1234_5678)
+}
+
+/// Clamps the sleep before the next wakeup: never busy-loop (≥100 ms), never
+/// oversleep a schedule (≤1 h). Pure for tests.
+fn clamp_wakeup(nearest: Option<Duration>) -> Duration {
+    const IDLE: Duration = Duration::from_secs(3600);
+    const MIN: Duration = Duration::from_millis(100);
+    nearest.map(|d| d.clamp(MIN, IDLE)).unwrap_or(IDLE)
 }
 
 impl DaemonState {
@@ -340,6 +518,9 @@ impl DaemonState {
                 | ipc::Command::SetVolume { .. }
                 | ipc::Command::SetQuality { .. }
                 | ipc::Command::SetBatteryPolicy { .. }
+                | ipc::Command::SetPlaylist { .. }
+                | ipc::Command::ClearPlaylist { .. }
+                | ipc::Command::PlaylistNext { .. }
         );
         let result = match request.command {
             ipc::Command::Ping => Ok(ipc::ResponseData::Pong {
@@ -353,7 +534,11 @@ impl DaemonState {
                 quality,
                 volume,
                 anime4k,
-            } => self.play(monitor, path, quality, volume, anime4k),
+            } => {
+                // A manual play cancels the monitor's playlist.
+                self.playlists.remove(&monitor);
+                self.play(monitor, path, quality, volume, anime4k)
+            }
             ipc::Command::Stop { monitor } => self.stop(monitor),
             ipc::Command::Pause { monitor } => self.set_paused(monitor, true),
             ipc::Command::Resume { monitor } => self.set_paused(monitor, false),
@@ -377,6 +562,26 @@ impl DaemonState {
                     status: format!("battery policy: {policy:?}").to_lowercase(),
                 })
             }
+            ipc::Command::SetPlaylist {
+                monitor,
+                items,
+                interval_minutes,
+                shuffle,
+                quality,
+                volume,
+                anime4k,
+            } => self.set_playlist(
+                monitor,
+                items,
+                interval_minutes,
+                shuffle,
+                quality,
+                volume,
+                anime4k,
+            ),
+            ipc::Command::ClearPlaylist { monitor } => self.clear_playlist(monitor),
+            ipc::Command::PlaylistNext { monitor } => self.playlist_next(monitor),
+            ipc::Command::GetPlaylist { monitor } => Ok(self.get_playlist(monitor)),
             ipc::Command::Shutdown => Ok(ipc::ResponseData::Acknowledged {
                 status: "shutting_down".into(),
             }),
@@ -450,11 +655,21 @@ impl DaemonState {
         let mut web_toggles: Vec<(platform::SurfaceHandle, bool, usize)> = Vec::new();
         for session in self.sessions.values_mut() {
             let fullscreen = self.fullscreen_monitors.contains(&session.monitor.name);
-            let desired = desired_pause(session.user_paused, fullscreen, global_pause);
+            let desired = desired_pause(
+                session.user_paused,
+                fullscreen,
+                global_pause,
+                session.overbudget,
+            );
             if desired == session.effective_paused {
                 continue;
             }
-            let reason = pause_reason(session.user_paused, global_pause, fullscreen);
+            let reason = pause_reason(
+                session.user_paused,
+                global_pause,
+                fullscreen,
+                session.overbudget,
+            );
             match &session.kind {
                 SessionKind::Mpv { player, .. } => match player.set_property_bool("pause", desired)
                 {
@@ -528,6 +743,37 @@ impl DaemonState {
         }
     }
 
+    /// Reacts to sustained CPU pressure by latch-pausing the likely culprit.
+    /// Web wallpapers run untrusted code and are the usual offender, so they
+    /// are paused first; mpv sessions only if no web wallpaper is live. The
+    /// pause is latched (`overbudget`) and cleared only when the user resumes,
+    /// so a runaway page cannot immediately un-pause itself.
+    fn handle_resource_pressure(&mut self, percent: f32) {
+        let has_live_web = self
+            .sessions
+            .values()
+            .any(|s| !s.effective_paused && matches!(s.kind, SessionKind::Web));
+        let mut hit = Vec::new();
+        for session in self.sessions.values_mut() {
+            if session.effective_paused || session.overbudget {
+                continue;
+            }
+            let is_web = matches!(session.kind, SessionKind::Web);
+            if has_live_web && !is_web {
+                continue; // blame the code-driven wallpaper first
+            }
+            session.overbudget = true;
+            hit.push(session.monitor.id);
+        }
+        if hit.is_empty() {
+            return; // nothing running to blame — likely another app's load
+        }
+        eprintln!(
+            "resource guard: wallpaper stack at {percent:.0}% CPU — pausing monitor(s) {hit:?}"
+        );
+        self.apply_politeness();
+    }
+
     /// Returns `true` when the daemon should exit (tray Quit).
     fn handle_tray(&mut self, event: platform::tray::TrayEvent) -> bool {
         use platform::tray::TrayEvent;
@@ -543,6 +789,12 @@ impl DaemonState {
                 if let Err((_, message)) = self.set_paused(None, false) {
                     eprintln!("tray resume failed: {message}");
                 } else {
+                    self.save_state();
+                }
+            }
+            TrayEvent::NextWallpaper => {
+                // Best-effort: silent when no playlist is running.
+                if self.playlist_next(None).is_ok() {
                     self.save_state();
                 }
             }
@@ -576,10 +828,27 @@ impl DaemonState {
             })
             .collect();
         wallpapers.sort_by_key(|wallpaper| wallpaper.monitor);
+        let mut playlists: Vec<PersistedPlaylist> = self
+            .playlists
+            .iter()
+            .map(|(monitor, ps)| PersistedPlaylist {
+                monitor: *monitor,
+                monitor_name: ps.monitor_name.clone(),
+                items: ps.items.clone(),
+                interval_minutes: ps.interval_minutes,
+                shuffle: ps.shuffle,
+                position: ps.rotation.current(),
+                quality: ps.quality,
+                volume: ps.volume,
+                anime4k: ps.anime4k,
+            })
+            .collect();
+        playlists.sort_by_key(|playlist| playlist.monitor);
         let state = PersistedState {
             version: STATE_VERSION,
             on_battery: self.battery_policy,
             wallpapers,
+            playlists,
         };
         if let Err(error) = write_state(path, &state) {
             eprintln!("failed to save state to {}: {error}", path.display());
@@ -624,6 +893,42 @@ impl DaemonState {
                 return;
             }
         };
+        // Playlists first: they own their monitor, so the matching plain
+        // wallpaper entry is skipped below to avoid a double play.
+        let mut playlist_monitors = std::collections::HashSet::new();
+        for entry in persisted.playlists {
+            if entry.items.is_empty() {
+                continue;
+            }
+            let Some(monitor) = resolve_monitor(entry.monitor, &entry.monitor_name, &monitors)
+            else {
+                eprintln!(
+                    "restore skipped playlist: monitor {} ({}) is not present",
+                    entry.monitor, entry.monitor_name
+                );
+                continue;
+            };
+            let interval = Duration::from_secs(u64::from(entry.interval_minutes) * 60);
+            let mut rotation =
+                playlist::Rotation::new(entry.items.len(), entry.shuffle, seed_now());
+            rotation.seek_to_item(entry.position);
+            let mut ps = PlaylistState {
+                monitor_name: entry.monitor_name,
+                items: entry.items,
+                interval,
+                interval_minutes: entry.interval_minutes,
+                shuffle: entry.shuffle,
+                rotation,
+                next_rotate_at: Instant::now() + interval,
+                quality: entry.quality,
+                volume: entry.volume,
+                anime4k: entry.anime4k,
+            };
+            self.play_playlist_current(monitor, &mut ps);
+            self.playlists.insert(monitor, ps);
+            playlist_monitors.insert(monitor);
+            println!("restored playlist on monitor {monitor}");
+        }
         for entry in persisted.wallpapers {
             let Some(monitor) = resolve_restore_monitor(&entry, &monitors) else {
                 eprintln!(
@@ -632,6 +937,9 @@ impl DaemonState {
                 );
                 continue;
             };
+            if playlist_monitors.contains(&monitor) {
+                continue; // handled by its playlist
+            }
             if !entry.path.is_file() {
                 eprintln!("restore skipped: media missing: {}", entry.path.display());
                 continue;
@@ -663,6 +971,212 @@ impl DaemonState {
         })
     }
 
+    /// The most-specific reason a session is paused, for the UI. Mirrors the
+    /// precedence of [`pause_reason`]; `None` when the session is playing.
+    fn paused_reason(&self, session: &Session) -> Option<ipc::PausedReason> {
+        if !session.effective_paused {
+            return None;
+        }
+        if session.user_paused {
+            Some(ipc::PausedReason::User)
+        } else if session.overbudget {
+            Some(ipc::PausedReason::Resources)
+        } else if self.fullscreen_monitors.contains(&session.monitor.name) {
+            Some(ipc::PausedReason::Game)
+        } else if self.politeness.session_locked {
+            Some(ipc::PausedReason::Lock)
+        } else if self.politeness.display_off {
+            Some(ipc::PausedReason::DisplayOff)
+        } else if self.politeness.on_battery && self.battery_policy == ipc::BatteryPolicy::Pause {
+            Some(ipc::PausedReason::Battery)
+        } else {
+            None
+        }
+    }
+
+    // ---- playlists ------------------------------------------------------
+
+    /// How long to sleep before the next event or the earliest playlist tick.
+    fn next_wakeup(&self) -> Duration {
+        let now = Instant::now();
+        let nearest = self
+            .playlists
+            .values()
+            .map(|ps| ps.next_rotate_at.saturating_duration_since(now))
+            .min();
+        clamp_wakeup(nearest)
+    }
+
+    /// Plays the rotation's current item on `monitor`, advancing past any
+    /// missing files (at most one full cycle). Returns whether anything played.
+    /// `ps` is owned by the caller, not the map, to avoid aliasing `self`.
+    fn play_playlist_current(&mut self, monitor: ipc::MonitorId, ps: &mut PlaylistState) -> bool {
+        if ps.items.is_empty() {
+            return false;
+        }
+        for _ in 0..ps.items.len() {
+            let path = ps.items[ps.rotation.current()].clone();
+            if path.is_file() {
+                match self.play(monitor, path, ps.quality, ps.volume, ps.anime4k) {
+                    Ok(_) => return true,
+                    Err((_, message)) => {
+                        eprintln!("playlist play failed on monitor {monitor}: {message}")
+                    }
+                }
+            } else {
+                eprintln!("playlist skip missing file: {}", path.display());
+            }
+            ps.rotation.advance();
+        }
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn set_playlist(
+        &mut self,
+        monitor: ipc::MonitorId,
+        items: Vec<PathBuf>,
+        interval_minutes: u32,
+        shuffle: bool,
+        quality: ipc::Quality,
+        volume: u8,
+        anime4k: bool,
+    ) -> CmdResult {
+        let name = self
+            .host
+            .enumerate_monitors()
+            .map_err(internal)?
+            .into_iter()
+            .find(|m| m.id == monitor)
+            .ok_or((
+                ipc::ErrorCode::MonitorNotFound,
+                format!("monitor {monitor} not found"),
+            ))?
+            .name;
+        let interval = Duration::from_secs(u64::from(interval_minutes) * 60);
+        let count = items.len();
+        let mut ps = PlaylistState {
+            monitor_name: name,
+            rotation: playlist::Rotation::new(count, shuffle, seed_now()),
+            items,
+            interval,
+            interval_minutes,
+            shuffle,
+            next_rotate_at: Instant::now() + interval,
+            quality,
+            volume,
+            anime4k,
+        };
+        let played = self.play_playlist_current(monitor, &mut ps);
+        self.playlists.insert(monitor, ps);
+        Ok(ipc::ResponseData::Acknowledged {
+            status: if played {
+                format!("playlist of {count} on monitor {monitor}")
+            } else {
+                format!("playlist set but nothing playable on monitor {monitor}")
+            },
+        })
+    }
+
+    fn clear_playlist(&mut self, monitor: Option<ipc::MonitorId>) -> CmdResult {
+        match monitor {
+            Some(monitor) => {
+                self.playlists.remove(&monitor);
+            }
+            None => self.playlists.clear(),
+        }
+        Ok(ipc::ResponseData::Acknowledged {
+            status: "playlist cleared".into(),
+        })
+    }
+
+    fn playlist_next(&mut self, monitor: Option<ipc::MonitorId>) -> CmdResult {
+        let targets: Vec<ipc::MonitorId> = match monitor {
+            Some(monitor) => vec![monitor],
+            None => self.playlists.keys().copied().collect(),
+        };
+        let mut advanced = false;
+        for monitor in targets {
+            if let Some(mut ps) = self.playlists.remove(&monitor) {
+                ps.rotation.advance();
+                self.play_playlist_current(monitor, &mut ps);
+                ps.next_rotate_at = Instant::now() + ps.interval;
+                self.playlists.insert(monitor, ps);
+                advanced = true;
+            }
+        }
+        if advanced {
+            Ok(ipc::ResponseData::Acknowledged {
+                status: "advanced".into(),
+            })
+        } else {
+            Err((
+                ipc::ErrorCode::PlaybackFailed,
+                "no playlist on that monitor".into(),
+            ))
+        }
+    }
+
+    fn get_playlist(&self, monitor: ipc::MonitorId) -> ipc::ResponseData {
+        let playlist = self.playlists.get(&monitor).map(|ps| ipc::PlaylistInfo {
+            monitor,
+            items: ps.items.clone(),
+            interval_minutes: ps.interval_minutes,
+            shuffle: ps.shuffle,
+            position: ps.rotation.current(),
+        });
+        ipc::ResponseData::Playlist { playlist }
+    }
+
+    /// Fires any playlists whose interval elapsed. Rotation is deferred while a
+    /// monitor's wallpaper is paused (game / lock / battery) so it never churns
+    /// behind a fullscreen app.
+    fn tick_playlists(&mut self, now: Instant) {
+        let due: Vec<ipc::MonitorId> = self
+            .playlists
+            .iter()
+            .filter(|(_, ps)| now >= ps.next_rotate_at)
+            .map(|(monitor, _)| *monitor)
+            .collect();
+        let mut advanced = false;
+        for monitor in due {
+            let Some(mut ps) = self.playlists.remove(&monitor) else {
+                continue;
+            };
+            let paused = self
+                .sessions
+                .get(&monitor)
+                .is_some_and(|session| session.effective_paused);
+            if paused {
+                ps.next_rotate_at = now + ps.interval;
+                self.playlists.insert(monitor, ps);
+                println!("playlist on monitor {monitor} deferred (paused)");
+                continue;
+            }
+            ps.rotation.advance();
+            self.play_playlist_current(monitor, &mut ps);
+            ps.next_rotate_at = now + ps.interval;
+            self.playlists.insert(monitor, ps);
+            advanced = true;
+        }
+        if advanced {
+            self.save_state();
+        }
+    }
+
+    /// Hover text for the tray icon: wallpaper count and live CPU.
+    fn tray_tooltip(&self, percent: f32) -> String {
+        let count = self.sessions.len();
+        if count == 0 {
+            "LimeWall — обои не запущены".to_string()
+        } else {
+            format!(
+                "LimeWall — обоев: {count} · CPU: {}%",
+                percent.round() as i64
+            )
+        }
+    }
+
     fn status(&self) -> ipc::ResponseData {
         let mut sessions: Vec<ipc::SessionStatus> = self
             .sessions
@@ -679,10 +1193,26 @@ impl DaemonState {
                 quality: session.quality,
                 volume: session.volume,
                 anime4k: session.anime4k,
+                paused_reason: self.paused_reason(session),
             })
             .collect();
         sessions.sort_by_key(|session| session.monitor);
-        ipc::ResponseData::Status { sessions }
+        let mut playlists: Vec<ipc::PlaylistSummary> = self
+            .playlists
+            .iter()
+            .map(|(monitor, ps)| ipc::PlaylistSummary {
+                monitor: *monitor,
+                len: ps.items.len(),
+                interval_minutes: ps.interval_minutes,
+                shuffle: ps.shuffle,
+            })
+            .collect();
+        playlists.sort_by_key(|playlist| playlist.monitor);
+        ipc::ResponseData::Status {
+            sessions,
+            stack_cpu_percent: fresh_cpu(self.last_cpu, Instant::now()),
+            playlists,
+        }
     }
 
     fn play(
@@ -740,6 +1270,7 @@ impl DaemonState {
                     anime4k,
                     user_paused: false,
                     effective_paused: false,
+                    overbudget: false,
                     monitor: info,
                 },
             );
@@ -803,6 +1334,7 @@ impl DaemonState {
                     anime4k,
                     user_paused: false,
                     effective_paused: false,
+                    overbudget: false,
                     monitor: info,
                 },
             );
@@ -840,6 +1372,8 @@ impl DaemonState {
             });
         }
         for monitor in &targets {
+            // Stopping a wallpaper also ends its playlist.
+            self.playlists.remove(monitor);
             if let Some(session) = self.sessions.remove(monitor) {
                 self.drop_session(session);
                 println!("stopped playback on monitor {monitor}");
@@ -864,6 +1398,11 @@ impl DaemonState {
         for monitor in &targets {
             if let Some(session) = self.sessions.get_mut(monitor) {
                 session.user_paused = paused;
+                // Resuming is an explicit "bring it back" — clear the watchdog
+                // latch so a once-runaway wallpaper can play again.
+                if !paused {
+                    session.overbudget = false;
+                }
             }
         }
         // The player state follows through the same reconciliation as the
@@ -954,9 +1493,11 @@ fn no_session(monitor: ipc::MonitorId) -> (ipc::ErrorCode, String) {
     )
 }
 
-fn pause_reason(user: bool, global: bool, fullscreen: bool) -> &'static str {
+fn pause_reason(user: bool, global: bool, fullscreen: bool, overbudget: bool) -> &'static str {
     if user {
         "user"
+    } else if overbudget {
+        "resource guard"
     } else if fullscreen {
         "fullscreen app"
     } else if global {
@@ -1013,10 +1554,20 @@ fn resolve_restore_monitor(
     entry: &PersistedSession,
     monitors: &[platform::MonitorInfo],
 ) -> Option<ipc::MonitorId> {
+    resolve_monitor(entry.monitor, &entry.monitor_name, monitors)
+}
+
+/// Monitor for a persisted id/name: device name first (indices shuffle when the
+/// topology changes), then the stored index.
+fn resolve_monitor(
+    id: ipc::MonitorId,
+    name: &str,
+    monitors: &[platform::MonitorInfo],
+) -> Option<ipc::MonitorId> {
     monitors
         .iter()
-        .find(|monitor| monitor.name == entry.monitor_name)
-        .or_else(|| monitors.iter().find(|monitor| monitor.id == entry.monitor))
+        .find(|monitor| monitor.name == name)
+        .or_else(|| monitors.iter().find(|monitor| monitor.id == id))
         .map(|monitor| monitor.id)
 }
 
@@ -1109,6 +1660,7 @@ mod tests {
             version: STATE_VERSION,
             on_battery: ipc::BatteryPolicy::Eco,
             wallpapers: vec![entry(0, r"\\.\DISPLAY1")],
+            playlists: vec![],
         };
         let json = serde_json::to_vec(&state).expect("serialize");
         let back: PersistedState = serde_json::from_slice(&json).expect("deserialize");
@@ -1125,6 +1677,39 @@ mod tests {
         assert_eq!(back.on_battery, ipc::BatteryPolicy::Pause);
     }
 
+    #[test]
+    fn state_files_without_playlists_default_to_empty() {
+        // A file written before the playlist feature restores with none.
+        let json = format!(r#"{{"version":{STATE_VERSION},"wallpapers":[]}}"#);
+        let back: PersistedState = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.playlists.is_empty());
+    }
+
+    #[test]
+    fn persisted_playlist_round_trips() {
+        let state = PersistedState {
+            version: STATE_VERSION,
+            on_battery: ipc::BatteryPolicy::Pause,
+            wallpapers: vec![],
+            playlists: vec![PersistedPlaylist {
+                monitor: 0,
+                monitor_name: r"\\.\DISPLAY1".into(),
+                items: vec![PathBuf::from("a.mp4"), PathBuf::from("b.mp4")],
+                interval_minutes: 15,
+                shuffle: true,
+                position: 1,
+                quality: ipc::Quality::Balanced,
+                volume: 0,
+                anime4k: false,
+            }],
+        };
+        let json = serde_json::to_vec(&state).expect("serialize");
+        let back: PersistedState = serde_json::from_slice(&json).expect("deserialize");
+        assert_eq!(back.playlists.len(), 1);
+        assert_eq!(back.playlists[0].position, 1);
+        assert_eq!(back.playlists[0].items.len(), 2);
+    }
+
     fn politeness(locked: bool, display_off: bool, on_battery: bool) -> Politeness {
         Politeness {
             session_locked: locked,
@@ -1137,15 +1722,78 @@ mod tests {
     fn nothing_pauses_when_idle_and_unpaused() {
         let calm = politeness(false, false, false);
         assert!(!calm.global_pause(ipc::BatteryPolicy::Pause));
-        assert!(!desired_pause(false, false, false));
+        assert!(!desired_pause(false, false, false, false));
     }
 
     #[test]
     fn user_pause_and_fullscreen_pause_a_single_monitor() {
         // No system-wide reason, but the user paused this monitor.
-        assert!(desired_pause(true, false, false));
+        assert!(desired_pause(true, false, false, false));
         // A fullscreen app on this monitor pauses only it.
-        assert!(desired_pause(false, true, false));
+        assert!(desired_pause(false, true, false, false));
+    }
+
+    #[test]
+    fn resource_guard_pauses_and_names_its_reason() {
+        // The watchdog latch pauses even when nothing else would.
+        assert!(desired_pause(false, false, false, true));
+        assert_eq!(pause_reason(false, false, false, true), "resource guard");
+        // The user's own pause still takes precedence in the reason.
+        assert_eq!(pause_reason(true, false, false, true), "user");
+    }
+
+    #[test]
+    fn breach_detector_fires_once_after_sustained_pressure() {
+        let mut d = BreachDetector::default();
+        // Below budget never fires.
+        for _ in 0..10 {
+            assert!(!d.observe(CPU_BUDGET_PERCENT - 1.0));
+        }
+        // BREACH_SAMPLES consecutive over-budget reads fire exactly once.
+        for _ in 0..BREACH_SAMPLES - 1 {
+            assert!(!d.observe(CPU_BUDGET_PERCENT + 5.0));
+        }
+        assert!(d.observe(CPU_BUDGET_PERCENT + 5.0));
+        assert!(!d.observe(CPU_BUDGET_PERCENT + 5.0)); // latched, no repeat
+        // Cooling down rearms; a fresh sustained breach fires again.
+        assert!(!d.observe(0.0));
+        for _ in 0..BREACH_SAMPLES - 1 {
+            assert!(!d.observe(CPU_BUDGET_PERCENT + 5.0));
+        }
+        assert!(d.observe(CPU_BUDGET_PERCENT + 5.0));
+    }
+
+    #[test]
+    fn clamp_wakeup_never_busy_loops_or_oversleeps() {
+        // No playlists → idle hour.
+        assert_eq!(clamp_wakeup(None), Duration::from_secs(3600));
+        // Already-due (0) is floored to 100 ms, not a hot spin.
+        assert_eq!(
+            clamp_wakeup(Some(Duration::ZERO)),
+            Duration::from_millis(100)
+        );
+        // A normal interval passes through.
+        assert_eq!(
+            clamp_wakeup(Some(Duration::from_secs(50))),
+            Duration::from_secs(50)
+        );
+        // Oversized is capped to the idle hour.
+        assert_eq!(
+            clamp_wakeup(Some(Duration::from_secs(9999))),
+            Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn fresh_cpu_reports_recent_rounded_and_drops_stale() {
+        let now = Instant::now();
+        // A recent sample is reported, rounded to 0.1%.
+        assert_eq!(fresh_cpu(Some((12.34, now)), now), Some(12.3));
+        // A stale sample (watchdog wedged) is dropped.
+        let old = now - (CPU_SAMPLE_FRESH + Duration::from_secs(1));
+        assert_eq!(fresh_cpu(Some((12.3, old)), now), None);
+        // No sample yet.
+        assert_eq!(fresh_cpu(None, now), None);
     }
 
     #[test]
@@ -1183,6 +1831,6 @@ mod tests {
         // The user resumed (user_paused = false) but a fullscreen game runs:
         // the monitor must remain paused until the game ends.
         let global = politeness(false, false, false).global_pause(ipc::BatteryPolicy::Pause);
-        assert!(desired_pause(false, true, global));
+        assert!(desired_pause(false, true, global, false));
     }
 }

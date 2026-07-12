@@ -27,13 +27,13 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     EnumWindows, FindWindowExW, FindWindowW, GWL_STYLE, GWLP_HINSTANCE, GWLP_USERDATA, GetMessageW,
-    GetWindowLongPtrW, HWND_MESSAGE, IsWindow, KillTimer, MONITORINFOF_PRIMARY, MSG, PostMessageW,
-    PostQuitMessage, RegisterClassW, SMTO_NORMAL, SPI_GETDESKWALLPAPER, SPI_SETDESKWALLPAPER,
-    SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOZORDER,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageTimeoutW, SendMessageW, SetParent, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_DESTROY, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_CHILD,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    GetWindowLongPtrW, HWND_MESSAGE, IsWindow, IsWindowVisible, KillTimer, MONITORINFOF_PRIMARY,
+    MSG, PostMessageW, PostQuitMessage, RegisterClassW, SMTO_NORMAL, SPI_GETDESKWALLPAPER,
+    SPI_SETDESKWALLPAPER, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE,
+    SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageTimeoutW, SendMessageW,
+    SetParent, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_DESTROY, WM_ERASEBKGND, WM_PAINT, WM_TIMER,
+    WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{BOOL, w};
 
@@ -860,6 +860,53 @@ fn find_workerw_sibling() -> Option<HWND> {
     (found != 0).then(|| hwnd(found))
 }
 
+/// Whether the desktop icon layer is visible. `None` when the shell window
+/// cannot be located (e.g. mid explorer restart). On Windows 11 24H2 the
+/// wallpaper layer stays invisible while desktop icons are hidden, so
+/// `Some(false)` is a diagnosable cause of "wallpaper not showing".
+pub(crate) fn desktop_icons_visible() -> Option<bool> {
+    let def_view = find_def_view()?;
+    // The icons live in a SysListView32 inside SHELLDLL_DefView; its visibility
+    // flips with the "Show desktop icons" toggle. Fall back to DefView itself.
+    let list = unsafe { FindWindowExW(Some(def_view), None, w!("SysListView32"), None) }
+        .ok()
+        .filter(|window| !window.is_invalid());
+    let target = list.unwrap_or(def_view);
+    Some(unsafe { IsWindowVisible(target).as_bool() })
+}
+
+/// Locates SHELLDLL_DefView, whether it sits directly under Progman or under a
+/// WorkerW sibling (layout differs across Windows versions).
+fn find_def_view() -> Option<HWND> {
+    let progman = unsafe { FindWindowW(w!("Progman"), None) }
+        .ok()
+        .filter(|window| !window.is_invalid())?;
+    if let Ok(def_view) =
+        unsafe { FindWindowExW(Some(progman), None, w!("SHELLDLL_DefView"), None) }
+        && !def_view.is_invalid()
+    {
+        return Some(def_view);
+    }
+
+    unsafe extern "system" fn enum_proc(window: HWND, out: LPARAM) -> BOOL {
+        unsafe {
+            if let Ok(def_view) = FindWindowExW(Some(window), None, w!("SHELLDLL_DefView"), None)
+                && !def_view.is_invalid()
+            {
+                *(out.0 as *mut isize) = def_view.0 as isize;
+                return BOOL(0); // found — stop enumerating
+            }
+        }
+        BOOL(1)
+    }
+
+    let mut found: isize = 0;
+    unsafe {
+        let _ = EnumWindows(Some(enum_proc), LPARAM(&raw mut found as isize));
+    }
+    (found != 0).then(|| hwnd(found))
+}
+
 // ---------------------------------------------------------------------------
 // Surface window
 // ---------------------------------------------------------------------------
@@ -892,10 +939,38 @@ fn build_webview(window: HWND, root: &std::path::Path, entry: &str) -> Result<wr
         .with_custom_protocol("wallpaper".into(), move |_id, request| {
             serve_local_asset(&served_root, request.uri().path())
         })
+        // A wallpaper is untrusted third-party code running behind the desktop
+        // 24/7. Keep it pinned to its own local origin: block any top-level
+        // navigation off `wallpaper://` and refuse to open new windows, so a
+        // page cannot navigate itself to a remote URL or spawn one. JS still
+        // runs freely — we contain reach, not execution. Subresource egress
+        // (fetch / XHR / WebSocket / remote scripts) is denied by the CSP
+        // header in `serve_local_asset`.
+        .with_navigation_handler(|url| url.starts_with("wallpaper://"))
+        .with_new_window_req_handler(|_url, _features| wry::NewWindowResponse::Deny)
         .with_url(format!("wallpaper://localhost/{entry}"))
         .build(&host)
         .map_err(|e| HostError::Desktop(format!("failed to create webview: {e}")))
 }
+
+/// Content Security Policy served with every wallpaper document. It confines a
+/// wallpaper to its own `wallpaper://` origin plus inert `data:`/`blob:` data:
+/// `connect-src` without a remote host means fetch/XHR/WebSocket cannot leave
+/// the machine, and the absence of remote origins in `script-src`/`frame-src`
+/// blocks remote code and embedded remote pages. Script execution stays
+/// permissive (`unsafe-inline`/`unsafe-eval`/`wasm-unsafe-eval`) because the
+/// wallpaper's own code is expected to run — the goal is to cut network reach,
+/// mining-pool traffic, exfiltration and botnet use, not to sandbox JS itself.
+const WALLPAPER_CSP: &str = "default-src 'self' wallpaper:; \
+script-src 'self' wallpaper: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; \
+style-src 'self' wallpaper: 'unsafe-inline'; \
+img-src 'self' wallpaper: data: blob:; \
+media-src 'self' wallpaper: data: blob:; \
+font-src 'self' wallpaper: data:; \
+connect-src 'self' wallpaper: data: blob:; \
+worker-src 'self' wallpaper: blob:; \
+frame-src 'self' wallpaper:; \
+object-src 'none'; base-uri 'none'; form-action 'none'";
 
 /// Serves a file from the wallpaper folder for the `wallpaper://` protocol.
 fn serve_local_asset(
@@ -920,6 +995,11 @@ fn serve_local_asset(
     match std::fs::read(&file) {
         Ok(bytes) => Response::builder()
             .header(CONTENT_TYPE, mime_for(&file))
+            // Contain untrusted wallpaper content: deny network egress and
+            // remote code (see WALLPAPER_CSP), and stop MIME sniffing from
+            // reinterpreting a data file as an executable type.
+            .header("Content-Security-Policy", WALLPAPER_CSP)
+            .header("X-Content-Type-Options", "nosniff")
             .body(Cow::Owned(bytes))
             .unwrap_or_else(|_| not_found()),
         Err(_) => {
@@ -1229,5 +1309,34 @@ mod tests {
     #[test]
     fn missing_surface_target_is_reported() {
         assert_eq!(target_monitor_bounds(&[], r"\\.\DISPLAY1"), None);
+    }
+
+    #[test]
+    fn served_assets_carry_the_containment_csp() {
+        let dir = std::env::temp_dir().join(format!("limewall-csp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("index.html"), b"<html></html>").expect("write html");
+
+        let ok = serve_local_asset(&dir, "/index.html");
+        assert_eq!(ok.status(), wry::http::StatusCode::OK);
+        let csp = ok
+            .headers()
+            .get("Content-Security-Policy")
+            .expect("CSP header present")
+            .to_str()
+            .expect("ascii CSP");
+        // Egress is pinned to the local origin: connect-src has no remote host,
+        // and the policy names no http(s) origin anywhere.
+        assert!(csp.contains("connect-src 'self' wallpaper:"), "csp: {csp}");
+        assert!(
+            !csp.contains("http://") && !csp.contains("https://"),
+            "csp: {csp}"
+        );
+
+        // Traversal above the served root is refused.
+        let escaped = serve_local_asset(&dir, "/../secret");
+        assert_eq!(escaped.status(), wry::http::StatusCode::NOT_FOUND);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

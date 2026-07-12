@@ -6,6 +6,8 @@
 pub enum TrayEvent {
     PauseAll,
     ResumeAll,
+    /// Advance every playlist to its next wallpaper.
+    NextWallpaper,
     OpenUi,
     Quit,
 }
@@ -15,6 +17,16 @@ pub struct TrayGuard {
     /// Held only for its Drop side effect.
     #[cfg(windows)]
     pub(crate) _inner: crate::tray_win32::Win32TrayGuard,
+}
+
+impl TrayGuard {
+    /// Updates the tray icon's hover tooltip (e.g. live CPU / wallpaper count).
+    pub fn set_tooltip(&self, text: &str) {
+        #[cfg(windows)]
+        self._inner.set_tooltip(text);
+        #[cfg(not(windows))]
+        let _ = text;
+    }
 }
 
 /// Shows the tray icon. `on_event` is called from the tray thread — forward

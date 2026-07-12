@@ -120,12 +120,15 @@ pub trait WallpaperHost {
 #[cfg(windows)]
 mod autostart_win32;
 #[cfg(windows)]
+mod resources_win32;
+#[cfg(windows)]
 mod tray_win32;
 #[cfg(windows)]
 mod watcher_win32;
 #[cfg(windows)]
 mod win32;
 
+pub mod resources;
 pub mod tray;
 pub mod watcher;
 
@@ -153,6 +156,21 @@ pub fn autostart_enabled(app: &str) -> Result<bool> {
     {
         let _ = app;
         Err(HostError::Unsupported("autostart"))
+    }
+}
+
+/// Whether the desktop icon layer is currently visible. `None` when it cannot
+/// be determined (shell window missing, non-Windows). Diagnostics use this to
+/// flag the Windows 11 24H2 case where hidden icons make the wallpaper layer
+/// invisible.
+pub fn desktop_icons_visible() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        win32::desktop_icons_visible()
+    }
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 

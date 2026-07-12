@@ -87,8 +87,36 @@ pub enum Command {
     SetBatteryPolicy {
         policy: BatteryPolicy,
     },
+    /// Rotate through `items` on `monitor`, switching every `interval_minutes`.
+    /// Plays the first (or a shuffled) item immediately and replaces any
+    /// wallpaper there.
+    SetPlaylist {
+        monitor: MonitorId,
+        items: Vec<PathBuf>,
+        interval_minutes: u32,
+        shuffle: bool,
+        quality: Quality,
+        volume: u8,
+        anime4k: bool,
+    },
+    /// Removes a monitor's playlist (or every one when `None`); the current
+    /// wallpaper keeps playing.
+    ClearPlaylist {
+        monitor: Option<MonitorId>,
+    },
+    /// Advances a monitor's playlist to the next wallpaper now (or every one).
+    PlaylistNext {
+        monitor: Option<MonitorId>,
+    },
+    GetPlaylist {
+        monitor: MonitorId,
+    },
     Shutdown,
 }
+
+/// Upper bounds for a playlist, enforced in [`Command::validate`].
+pub const MAX_PLAYLIST_ITEMS: usize = 512;
+pub const MAX_INTERVAL_MINUTES: u32 = 1440;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -115,6 +143,32 @@ impl Command {
                 Ok(())
             }
             Self::SetVolume { volume, .. } => validate_volume(*volume),
+            Self::SetPlaylist {
+                items,
+                interval_minutes,
+                volume,
+                ..
+            } => {
+                validate_volume(*volume)?;
+                if items.is_empty() {
+                    return Err(ValidationError::EmptyPlaylist);
+                }
+                if items.len() > MAX_PLAYLIST_ITEMS {
+                    return Err(ValidationError::PlaylistTooLarge(items.len()));
+                }
+                for path in items {
+                    if path.as_os_str().is_empty() {
+                        return Err(ValidationError::EmptyMediaPath);
+                    }
+                    if !path.is_absolute() {
+                        return Err(ValidationError::RelativeMediaPath(path.clone()));
+                    }
+                }
+                if *interval_minutes < 1 || *interval_minutes > MAX_INTERVAL_MINUTES {
+                    return Err(ValidationError::InvalidInterval(*interval_minutes));
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -177,12 +231,56 @@ pub enum ResponseBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseData {
-    Pong { daemon_version: String },
-    Monitors { monitors: Vec<Monitor> },
-    Status { sessions: Vec<SessionStatus> },
-    Autostart { enabled: bool },
-    BatteryPolicy { policy: BatteryPolicy },
-    Acknowledged { status: String },
+    Pong {
+        daemon_version: String,
+    },
+    Monitors {
+        monitors: Vec<Monitor>,
+    },
+    Status {
+        sessions: Vec<SessionStatus>,
+        /// CPU% of the whole wallpaper process tree, from the resource watchdog.
+        /// `None` off-Windows, on daemons that predate the field, or before the
+        /// first sample.
+        #[serde(default)]
+        stack_cpu_percent: Option<f32>,
+        /// Active playlists, one per monitor that has one. Empty on daemons that
+        /// predate the field.
+        #[serde(default)]
+        playlists: Vec<PlaylistSummary>,
+    },
+    Autostart {
+        enabled: bool,
+    },
+    BatteryPolicy {
+        policy: BatteryPolicy,
+    },
+    Playlist {
+        playlist: Option<PlaylistInfo>,
+    },
+    Acknowledged {
+        status: String,
+    },
+}
+
+/// A monitor's playlist as reported by `GetPlaylist`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistInfo {
+    pub monitor: MonitorId,
+    pub items: Vec<PathBuf>,
+    pub interval_minutes: u32,
+    pub shuffle: bool,
+    /// Index into `items` of the wallpaper currently showing.
+    pub position: usize,
+}
+
+/// Compact playlist descriptor carried in `Status` for the polling UI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistSummary {
+    pub monitor: MonitorId,
+    pub len: usize,
+    pub interval_minutes: u32,
+    pub shuffle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -227,6 +325,11 @@ pub struct SessionStatus {
     pub quality: Quality,
     pub volume: u8,
     pub anime4k: bool,
+    /// Why a paused session is paused (`None` when playing, or on daemons that
+    /// predate the field). Lets the UI explain the pause instead of showing a
+    /// bare "paused".
+    #[serde(default)]
+    pub paused_reason: Option<PausedReason>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +338,24 @@ pub enum PlaybackState {
     Playing,
     Paused,
     Stopped,
+}
+
+/// Why a wallpaper is currently paused, most-specific first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PausedReason {
+    /// The user paused it explicitly.
+    User,
+    /// The resource watchdog latched a wallpaper that pegged the CPU.
+    Resources,
+    /// A fullscreen app (usually a game) is in the foreground.
+    Game,
+    /// On battery power with the pause policy.
+    Battery,
+    /// The session is locked.
+    Lock,
+    /// The display is off.
+    DisplayOff,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -247,6 +368,12 @@ pub enum ValidationError {
     EmptyMediaPath,
     #[error("media path must be absolute: {}", .0.display())]
     RelativeMediaPath(PathBuf),
+    #[error("playlist must not be empty")]
+    EmptyPlaylist,
+    #[error("playlist has {0} items; maximum is {MAX_PLAYLIST_ITEMS}")]
+    PlaylistTooLarge(usize),
+    #[error("interval must be 1-{MAX_INTERVAL_MINUTES} minutes, got {0}")]
+    InvalidInterval(u32),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -302,6 +429,113 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn session_status_reason_round_trips_and_defaults_to_none() {
+        // A reason serializes as snake_case and comes back intact.
+        let paused = SessionStatus {
+            monitor: 0,
+            state: PlaybackState::Paused,
+            path: None,
+            quality: Quality::Balanced,
+            volume: 0,
+            anime4k: false,
+            paused_reason: Some(PausedReason::Resources),
+        };
+        let json = serde_json::to_string(&paused).expect("serialize");
+        assert!(json.contains(r#""paused_reason":"resources""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<SessionStatus>(&json).unwrap(),
+            paused
+        );
+
+        // A payload from a daemon that predates the field deserializes as None.
+        let legacy = r#"{"monitor":0,"state":"playing","path":null,
+            "quality":"balanced","volume":0,"anime4k":false}"#;
+        let back: SessionStatus = serde_json::from_str(legacy).expect("legacy deserialize");
+        assert_eq!(back.paused_reason, None);
+    }
+
+    #[test]
+    fn status_extras_round_trip_and_default_when_absent() {
+        let status = ResponseData::Status {
+            sessions: vec![],
+            stack_cpu_percent: Some(12.5),
+            playlists: vec![PlaylistSummary {
+                monitor: 0,
+                len: 3,
+                interval_minutes: 15,
+                shuffle: true,
+            }],
+        };
+        let json = serde_json::to_string(&status).expect("serialize");
+        assert_eq!(serde_json::from_str::<ResponseData>(&json).unwrap(), status);
+
+        // A Status from a daemon that predates the fields fills defaults.
+        let legacy = r#"{"type":"status","sessions":[]}"#;
+        let back: ResponseData = serde_json::from_str(legacy).expect("legacy deserialize");
+        assert_eq!(
+            back,
+            ResponseData::Status {
+                sessions: vec![],
+                stack_cpu_percent: None,
+                playlists: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn set_playlist_validation_rejects_bad_input() {
+        let ok = Command::SetPlaylist {
+            monitor: 0,
+            items: vec![absolute_media_path()],
+            interval_minutes: 15,
+            shuffle: false,
+            quality: Quality::Balanced,
+            volume: 0,
+            anime4k: false,
+        };
+        assert!(ok.validate().is_ok());
+
+        let empty = Command::SetPlaylist {
+            monitor: 0,
+            items: vec![],
+            interval_minutes: 15,
+            shuffle: false,
+            quality: Quality::Balanced,
+            volume: 0,
+            anime4k: false,
+        };
+        assert_eq!(empty.validate(), Err(ValidationError::EmptyPlaylist));
+
+        let bad_interval = Command::SetPlaylist {
+            monitor: 0,
+            items: vec![absolute_media_path()],
+            interval_minutes: 0,
+            shuffle: false,
+            quality: Quality::Balanced,
+            volume: 0,
+            anime4k: false,
+        };
+        assert_eq!(
+            bad_interval.validate(),
+            Err(ValidationError::InvalidInterval(0))
+        );
+
+        let relative = Command::SetPlaylist {
+            monitor: 0,
+            items: vec![PathBuf::from("clip.mp4")],
+            interval_minutes: 15,
+            shuffle: false,
+            quality: Quality::Balanced,
+            volume: 0,
+            anime4k: false,
+        };
+        assert!(matches!(
+            relative.validate(),
+            Err(ValidationError::RelativeMediaPath(_))
+        ));
+    }
 
     fn absolute_media_path() -> PathBuf {
         #[cfg(windows)]

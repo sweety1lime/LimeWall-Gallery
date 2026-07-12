@@ -1,5 +1,6 @@
 mod daemon;
 mod playback;
+mod playlist;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -140,6 +141,47 @@ enum DaemonCommand {
         #[arg(value_enum)]
         action: BatteryAction,
     },
+    /// Manage a monitor's auto-rotating playlist.
+    Playlist {
+        #[command(subcommand)]
+        action: PlaylistAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum PlaylistAction {
+    /// Set a playlist on a monitor and start it.
+    Set {
+        /// Media files to rotate through.
+        files: Vec<PathBuf>,
+        #[arg(long, default_value_t = 0)]
+        monitor: platform::MonitorId,
+        #[arg(long, default_value_t = 15)]
+        interval_minutes: u32,
+        #[arg(long)]
+        shuffle: bool,
+        #[arg(long, value_enum, default_value_t = Quality::Balanced)]
+        quality: Quality,
+        #[arg(long, default_value_t = 0)]
+        volume: u8,
+        #[arg(long)]
+        anime4k: bool,
+    },
+    /// Remove a monitor's playlist (or every one).
+    Clear {
+        #[arg(long)]
+        monitor: Option<platform::MonitorId>,
+    },
+    /// Advance to the next wallpaper now.
+    Next {
+        #[arg(long)]
+        monitor: Option<platform::MonitorId>,
+    },
+    /// Show a monitor's playlist.
+    Status {
+        #[arg(long, default_value_t = 0)]
+        monitor: platform::MonitorId,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -257,6 +299,31 @@ fn ctl(endpoint: Option<&str>, command: DaemonCommand) -> anyhow::Result<()> {
                 policy: ipc::BatteryPolicy::Keep,
             },
         },
+        DaemonCommand::Playlist { action } => match action {
+            PlaylistAction::Set {
+                files,
+                monitor,
+                interval_minutes,
+                shuffle,
+                quality,
+                volume,
+                anime4k,
+            } => ipc::Command::SetPlaylist {
+                monitor,
+                items: files
+                    .iter()
+                    .map(|f| f.canonicalize().unwrap_or_else(|_| f.clone()))
+                    .collect(),
+                interval_minutes,
+                shuffle,
+                quality: quality.into(),
+                volume,
+                anime4k,
+            },
+            PlaylistAction::Clear { monitor } => ipc::Command::ClearPlaylist { monitor },
+            PlaylistAction::Next { monitor } => ipc::Command::PlaylistNext { monitor },
+            PlaylistAction::Status { monitor } => ipc::Command::GetPlaylist { monitor },
+        },
     };
     let response = ipc::send_request(&endpoint, &ipc::Request::new(1, command))
         .with_context(|| format!("failed to contact renderer at {endpoint:?}"))?;
@@ -288,9 +355,25 @@ fn print_daemon_result(result: ipc::ResponseData) -> anyhow::Result<()> {
                 );
             }
         }
-        ipc::ResponseData::Status { sessions } => {
+        ipc::ResponseData::Status {
+            sessions,
+            stack_cpu_percent,
+            playlists,
+        } => {
             if sessions.is_empty() {
                 println!("no active sessions");
+            }
+            if let Some(percent) = stack_cpu_percent {
+                println!("stack CPU: {percent:.1}%");
+            }
+            for playlist in &playlists {
+                println!(
+                    "monitor {}: playlist of {} every {} min{}",
+                    playlist.monitor,
+                    playlist.len,
+                    playlist.interval_minutes,
+                    if playlist.shuffle { " (shuffle)" } else { "" }
+                );
             }
             for session in sessions {
                 println!(
@@ -332,6 +415,23 @@ fn print_daemon_result(result: ipc::ResponseData) -> anyhow::Result<()> {
                 }
             );
         }
+        ipc::ResponseData::Playlist { playlist } => match playlist {
+            Some(p) => {
+                println!(
+                    "monitor {}: playlist of {} every {} min{}, at #{}",
+                    p.monitor,
+                    p.items.len(),
+                    p.interval_minutes,
+                    if p.shuffle { " (shuffle)" } else { "" },
+                    p.position
+                );
+                for (index, item) in p.items.iter().enumerate() {
+                    let mark = if index == p.position { "→" } else { " " };
+                    println!("  {mark} {}", item.display());
+                }
+            }
+            None => println!("no playlist on that monitor"),
+        },
         ipc::ResponseData::Acknowledged { status } => {
             println!("{status}");
         }

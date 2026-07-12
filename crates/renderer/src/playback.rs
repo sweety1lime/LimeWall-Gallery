@@ -286,10 +286,7 @@ pub fn find_anime4k_shaders() -> Option<Vec<PathBuf>> {
     shader_roots()
         .map(|root| root.join("anime4k"))
         .find_map(|root| {
-            let shaders: Vec<_> = ANIME4K_MODE_A
-                .iter()
-                .map(|name| root.join(name))
-                .collect();
+            let shaders: Vec<_> = ANIME4K_MODE_A.iter().map(|name| root.join(name)).collect();
             shaders.iter().all(|path| path.is_file()).then_some(shaders)
         })
 }
