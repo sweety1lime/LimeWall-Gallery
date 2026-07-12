@@ -3,6 +3,12 @@
 Правило проекта: только LGPL (динамически) / MIT / Apache-2.0 / BSD.
 Каждый бинарник и файл фиксируется здесь с источником и хэшем.
 
+**Распространяемое уведомление:** `licenses/THIRD-PARTY-NOTICES.md` — то, что
+кладётся в сборку (атрибуция, LGPL-исходники и право на пере-линковку, текст MIT).
+Каноничные тексты GNU (LGPL-2.1/3.0, GPL-3.0) тянет `scripts/fetch-licenses.ps1`
+в `licenses/vendor/` (не в git, как `third_party/`), а `scripts/build-portable.ps1`
+раскладывает их в `dist/LimeWall/licenses/`.
+
 ## libmpv (LGPLv2.1+)
 
 - **Что**: `libmpv-2.dll`, client API v2.5; ffmpeg (LGPL-конфигурация) статически влинкован внутрь dll.

@@ -11,6 +11,16 @@ $ffmpeg = Join-Path $repoRoot "third_party\ffmpeg\unpacked\ffmpeg.exe"
 if (-not (Test-Path $libmpv)) { throw "run scripts/fetch-libmpv.ps1 first" }
 if (-not (Test-Path $ffmpeg)) { throw "run scripts/fetch-ffmpeg.ps1 first" }
 
+# LGPL license texts must ship with the LGPL binaries above. Fetch them if the
+# maintainer has not run scripts/fetch-licenses.ps1 yet; only warn when offline
+# so a dev build still completes (a public release must include them).
+$vendorLicenses = Join-Path $repoRoot "licenses\vendor"
+if (-not (Test-Path (Join-Path $vendorLicenses "lgpl-3.0.txt"))) {
+    Write-Host "fetching GNU license texts..."
+    try { & (Join-Path $PSScriptRoot "fetch-licenses.ps1") }
+    catch { Write-Warning "could not fetch license texts (offline?): $_ — bundling notice only" }
+}
+
 Write-Host "building renderer (release)..."
 & cargo build -p renderer --release
 if ($LASTEXITCODE -ne 0) { throw "renderer build failed" }
@@ -40,6 +50,16 @@ Copy-Item (Join-Path $repoRoot "assets\shaders\FSR.glsl") (Join-Path $out "shade
 Copy-Item (Join-Path $repoRoot "assets\shaders\anime4k\*.glsl") (Join-Path $out "shaders\anime4k") -Force
 # Sample web wallpaper for testing.
 Copy-Item (Join-Path $repoRoot "assets\web") (Join-Path $out "web") -Recurse -Force
+
+# Third-party license notices (LGPL binaries above + MIT shaders/three.js).
+$licensesOut = Join-Path $out "licenses"
+New-Item -ItemType Directory -Force $licensesOut | Out-Null
+Copy-Item (Join-Path $repoRoot "licenses\THIRD-PARTY-NOTICES.md") $licensesOut -Force
+if (Test-Path $vendorLicenses) {
+    Copy-Item (Join-Path $vendorLicenses "*.txt") $licensesOut -Force
+} else {
+    Write-Warning "GNU license texts missing — run scripts/fetch-licenses.ps1 before a public release"
+}
 
 Write-Host ""
 Write-Host "portable build ready: $out"

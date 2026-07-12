@@ -4,6 +4,9 @@
 # Downloaded binaries (see scripts/fetch-libmpv.ps1, docs/third-party.md)
 /third_party
 
+# Canonical GNU license texts (see scripts/fetch-licenses.ps1)
+/licenses/vendor
+
 # Portable build output (scripts/build-portable.ps1)
 /dist
 
