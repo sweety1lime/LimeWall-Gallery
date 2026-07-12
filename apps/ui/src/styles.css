@@ -1117,6 +1117,11 @@ body.dragging .dropzone {
   text-overflow: ellipsis;
 }
 
+.card-author.verified {
+  color: var(--lime-text);
+  font-weight: 600;
+}
+
 .card-actions {
   display: flex;
   gap: 4px;

@@ -169,7 +169,23 @@ let galleryOpen = false;
 let galleryPacks: GalleryPack[] = [];
 let galleryLoading = false;
 let galleryError: string | null = null;
-const galleryDownloaded = new Set<string>();
+const galleryDownloaded = new Set<string>(); // gallery pack ids, this session
+// Library item ids that came from the gallery — persisted, drives the
+// "✓ из каталога" badge on library cards.
+const galleryVerified = new Set<string>(readJson<string[]>("lw-gallery-verified", []));
+
+function readJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function persistVerified() {
+  localStorage.setItem("lw-gallery-verified", JSON.stringify([...galleryVerified]));
+}
 
 // Control values for the selected monitor: UI-owned, used at play time and
 // pushed live to an active session. Adopted from a session on monitor switch.
@@ -441,8 +457,10 @@ function renderContent() {
 function openGallery() {
   if (!connected) return;
   galleryOpen = true;
+  // Show the last-seen catalog instantly, then refresh in the background.
+  if (galleryPacks.length === 0) galleryPacks = readJson<GalleryPack[]>("lw-catalog-cache", []);
   renderContent();
-  if (galleryPacks.length === 0 && !galleryLoading && galleryError === null) void loadGallery();
+  void loadGallery();
 }
 
 async function loadGallery() {
@@ -451,9 +469,14 @@ async function loadGallery() {
   renderContent();
   try {
     galleryPacks = await invoke<GalleryPack[]>("gallery_fetch_catalog");
+    localStorage.setItem("lw-catalog-cache", JSON.stringify(galleryPacks));
   } catch {
-    galleryError = "Не удалось загрузить каталог. Проверьте интернет и попробуйте ещё раз.";
-    galleryPacks = [];
+    // Keep the cached catalog if we have one; only hard-fail when empty.
+    if (galleryPacks.length === 0) {
+      galleryError = "Не удалось загрузить каталог. Проверьте интернет и попробуйте ещё раз.";
+    } else {
+      report("Нет сети — показан сохранённый каталог");
+    }
   } finally {
     galleryLoading = false;
     renderContent();
@@ -540,7 +563,11 @@ function renderGalleryCard(pack: GalleryPack): HTMLElement {
       "div",
       { class: "card-foot-info" },
       h("div", { class: "card-name", title: pack.name }, pack.name),
-      h("div", { class: "card-author" }, `${pack.author} · ${pack.license}`),
+      h(
+        "div",
+        { class: "card-author", title: `Лицензия: ${pack.license}` },
+        `${pack.author} · ${formatSize(pack.size)}`,
+      ),
     ),
     dlBtn,
   );
@@ -553,6 +580,8 @@ async function downloadPack(pack: GalleryPack) {
   try {
     const item = await call<LibraryItem>("gallery_download", { pack });
     galleryDownloaded.add(pack.id);
+    galleryVerified.add(item.id);
+    persistVerified();
     report(`«${item.name}» добавлено в библиотеку`);
     // refreshLibrary → renderContent; galleryOpen is still true so it redraws
     // the gallery with this card now marked as downloaded.
@@ -1088,7 +1117,13 @@ function renderCard(item: LibraryItem): HTMLElement {
       "div",
       { class: "card-foot-info" },
       h("div", { class: "card-name", title: item.name }, item.name),
-      h("div", { class: "card-author" }, item.author ?? "локально"),
+      galleryVerified.has(item.id)
+        ? h(
+            "div",
+            { class: "card-author verified", title: "Скачано из каталога LimeWall" },
+            `✓ из каталога · ${item.author ?? "LimeWall"}`,
+          )
+        : h("div", { class: "card-author" }, item.author ?? "локально"),
     ),
     h("div", { class: "card-actions" }, shareBtn, delBtn),
   );
@@ -1481,7 +1516,16 @@ async function removeLibraryItem(item: LibraryItem) {
   await call<void>("library_remove", { id: item.id });
   previewCache.delete(item.id);
   if (heroId === item.id) heroId = null;
+  if (galleryVerified.delete(item.id)) persistVerified();
   await refreshLibrary();
+}
+
+// Human-readable file size.
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return (bytes / 1024 / 1024 / 1024).toFixed(1) + " ГБ";
+  if (bytes >= 1024 * 1024) return Math.round(bytes / 1024 / 1024) + " МБ";
+  if (bytes >= 1024) return Math.round(bytes / 1024) + " КБ";
+  return bytes + " Б";
 }
 
 function toggleAutostart() {
