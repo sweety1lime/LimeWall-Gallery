@@ -53,6 +53,31 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         monitor: platform::MonitorId,
     },
+    /// Package a media file into a `.wpk` for the gallery, printing its
+    /// SHA-256, size and a ready catalog entry.
+    Pack {
+        /// Wallpaper file (mp4/mkv/webm/mov/avi/m4v for video, png/jpg/jpeg/
+        /// bmp/webp for image).
+        file: PathBuf,
+        /// Display name (default: the file name without extension).
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "unknown")]
+        author: String,
+        #[arg(long, default_value = "unknown")]
+        license: String,
+        #[arg(long, default_value = "1.0")]
+        version: String,
+        /// Optional preview image (jpg/png) shown in the catalog.
+        #[arg(long)]
+        preview: Option<PathBuf>,
+        /// Pack id / slug (default: a slug derived from the name).
+        #[arg(long)]
+        id: Option<String>,
+        /// Output `.wpk` path (default: `<id>.wpk` next to the media).
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
     /// Run the long-lived local IPC daemon (phase 2).
     Serve {
         /// Override the per-user local socket name (primarily for tests).
@@ -236,9 +261,143 @@ fn main() -> anyhow::Result<()> {
             anime4k,
         } => play(&file, monitor, quality, volume, anime4k),
         Command::TestWeb { file, monitor } => test_web(&file, monitor),
+        Command::Pack {
+            file,
+            name,
+            author,
+            license,
+            version,
+            preview,
+            id,
+            out,
+        } => pack(&file, name, author, license, version, preview.as_deref(), id, out),
         Command::Serve { endpoint, state } => daemon::run(endpoint.as_deref(), state.as_deref()),
         Command::Ctl { endpoint, command } => ctl(endpoint.as_deref(), command),
     }
+}
+
+// ---------------------------------------------------------------------------
+// pack: build a .wpk for the gallery
+// ---------------------------------------------------------------------------
+
+const VIDEO_EXTS: [&str; 6] = ["mp4", "mkv", "webm", "mov", "avi", "m4v"];
+const IMAGE_EXTS: [&str; 5] = ["png", "jpg", "jpeg", "bmp", "webp"];
+
+fn slugify(text: &str) -> String {
+    let mut slug = String::new();
+    let mut dash = false;
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            dash = false;
+        } else if !dash && !slug.is_empty() {
+            slug.push('-');
+            dash = true;
+        }
+    }
+    slug.trim_end_matches('-').to_owned()
+}
+
+fn ext_lower(path: &Path) -> String {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack(
+    file: &Path,
+    name: Option<String>,
+    author: String,
+    license: String,
+    version: String,
+    preview: Option<&Path>,
+    id: Option<String>,
+    out: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(file.is_file(), "media file not found: {}", file.display());
+    let ext = ext_lower(file);
+    let media_type = if VIDEO_EXTS.contains(&ext.as_str()) {
+        wpk::MediaType::Video
+    } else if IMAGE_EXTS.contains(&ext.as_str()) {
+        wpk::MediaType::Image
+    } else if ext == "gif" {
+        anyhow::bail!("convert the GIF to mp4 first (the engine plays GIFs as video)");
+    } else {
+        anyhow::bail!("unsupported media type: .{ext} (video or image only)");
+    };
+
+    let name = name.unwrap_or_else(|| {
+        file.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wallpaper")
+            .to_owned()
+    });
+    let id = id.unwrap_or_else(|| slugify(&name));
+    anyhow::ensure!(!id.is_empty(), "empty pack id; pass --id");
+
+    let entry = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("bad media file name")?
+        .to_owned();
+
+    // Optional preview embedded as preview.<ext>.
+    let preview_name = preview.map(|p| format!("preview.{}", ext_lower(p)));
+    let manifest = wpk::Manifest {
+        id: id.clone(),
+        media_type,
+        entry: entry.clone(),
+        name: name.clone(),
+        author: author.clone(),
+        license: license.clone(),
+        version,
+        preview: preview_name.clone(),
+        options: serde_json::Map::new(),
+    };
+
+    let mut files: Vec<(&str, &Path)> = vec![(entry.as_str(), file)];
+    if let (Some(pname), Some(ppath)) = (preview_name.as_deref(), preview) {
+        files.push((pname, ppath));
+    }
+
+    let out = out.unwrap_or_else(|| PathBuf::from(format!("{id}.wpk")));
+    wpk::write_package(&out, &manifest, &files)
+        .map_err(|error| anyhow::anyhow!("failed to write package: {error}"))?;
+
+    let (sha, size) = sha256_and_size(&out)?;
+    let kind = match media_type {
+        wpk::MediaType::Video => "video",
+        wpk::MediaType::Image => "image",
+        _ => unreachable!(),
+    };
+    println!("wrote {}", out.display());
+    println!("sha256: {sha}");
+    println!("size:   {size} bytes");
+    println!("\nCatalog entry (set download_url after you upload the .wpk):\n");
+    println!(
+        "{{\n  \"id\": \"{id}\",\n  \"name\": \"{name}\",\n  \"author\": \"{author}\",\n  \"type\": \"{kind}\",\n  \"license\": \"{license}\",\n  \"sha256\": \"{sha}\",\n  \"size\": {size},\n  \"download_url\": \"https://github.com/sweety1lime/LimeWall-Gallery/releases/download/{id}/{id}.wpk\",\n  \"tags\": []\n}}"
+    );
+    Ok(())
+}
+
+fn sha256_and_size(path: &Path) -> anyhow::Result<(String, u64)> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let size = file.metadata()?.len();
+    let hex = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    Ok((hex, size))
 }
 
 // ---------------------------------------------------------------------------

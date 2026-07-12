@@ -1669,7 +1669,9 @@ dependencies = [
  "platform",
  "serde",
  "serde_json",
+ "sha2",
  "winresource",
+ "wpk",
 ]
 
 [[package]]

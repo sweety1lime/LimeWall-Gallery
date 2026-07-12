@@ -15,14 +15,22 @@
 
 ## Как добавить свой пак
 
-1. Соберите `.wpk` в приложении («Поделиться .wpk»).
-2. Захостьте файл: приложите его к **GitHub Release** этого репозитория
-   (или к своему форку) — так `download_url` будет вида
+1. **Соберите `.wpk`** из видео/картинки одной командой — она сразу печатает
+   SHA-256, размер и готовую запись каталога:
+
+   ```
+   cargo run -p renderer -- pack wall.mp4 --name "Aurora Drift" --author "2fame" --license "CC-BY-4.0" --preview preview.jpg
+   ```
+
+   (Или экспортом из приложения — кнопка «Поделиться .wpk» на карточке.)
+2. **Захостьте `.wpk`**: приложите его к **GitHub Release** этого репозитория
+   (или своего форка) — тогда `download_url` будет вида
    `https://github.com/.../releases/download/<tag>/<file>.wpk`.
-3. Посчитайте SHA-256 файла (`sha256sum file.wpk` / `Get-FileHash file.wpk`).
-4. Добавьте запись в `gallery/catalog.json` и превью в `gallery/packs/<id>/preview.jpg`.
-5. Откройте Pull Request. Пройдёт автоматическая проверка (`gallery/validate.mjs`),
-   затем ревью — и после мержа пак появится в каталоге у всех.
+3. **Добавьте запись** из шага 1 в `gallery/catalog.json` (подставив реальный
+   `download_url`) и положите превью в `gallery/packs/<id>/preview.jpg`.
+4. **Откройте Pull Request.** Пройдут автопроверки (`validate.mjs` — структура,
+   `verify-downloads.mjs` — совпадение SHA-256 с файлом), затем ревью — и после
+   мержа пак появится в каталоге у всех.
 
 ## Формат записи каталога
 
