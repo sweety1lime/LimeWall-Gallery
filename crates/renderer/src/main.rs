@@ -71,6 +71,10 @@ enum Command {
         /// Optional preview image (jpg/png) shown in the catalog.
         #[arg(long)]
         preview: Option<PathBuf>,
+        /// Re-encode video through ffmpeg to a normalized VP9 loop (caps the
+        /// resolution, strips metadata and audio) before packaging.
+        #[arg(long)]
+        reencode: bool,
         /// Pack id / slug (default: a slug derived from the name).
         #[arg(long)]
         id: Option<String>,
@@ -274,9 +278,20 @@ fn main() -> anyhow::Result<()> {
             license,
             version,
             preview,
+            reencode,
             id,
             out,
-        } => pack(&file, name, author, license, version, preview.as_deref(), id, out),
+        } => pack(
+            &file,
+            name,
+            author,
+            license,
+            version,
+            preview.as_deref(),
+            reencode,
+            id,
+            out,
+        ),
         Command::Inspect { files } => inspect(&files),
         Command::Serve { endpoint, state } => daemon::run(endpoint.as_deref(), state.as_deref()),
         Command::Ctl { endpoint, command } => ctl(endpoint.as_deref(), command),
@@ -320,6 +335,7 @@ fn pack(
     license: String,
     version: String,
     preview: Option<&Path>,
+    reencode: bool,
     id: Option<String>,
     out: Option<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -344,7 +360,23 @@ fn pack(
     let id = id.unwrap_or_else(|| slugify(&name));
     anyhow::ensure!(!id.is_empty(), "empty pack id; pass --id");
 
-    let entry = file
+    // Optionally normalize video through ffmpeg (VP9, capped, no metadata/audio)
+    // before packaging. Dropped when the temp guard goes out of scope.
+    let reencoded = if reencode && media_type == wpk::MediaType::Video {
+        // Named by id so the archive entry is clean (e.g. `aurora-drift.webm`).
+        let temp = std::env::temp_dir().join(format!("{id}.webm"));
+        println!("re-encoding to a normalized VP9 loop…");
+        reencode_video(file, &temp)?;
+        Some(TempFile(temp))
+    } else {
+        if reencode {
+            eprintln!("note: --reencode applies to video only; packaging the image as-is");
+        }
+        None
+    };
+    let media = reencoded.as_ref().map(|t| t.0.as_path()).unwrap_or(file);
+
+    let entry = media
         .file_name()
         .and_then(|n| n.to_str())
         .context("bad media file name")?
@@ -364,7 +396,7 @@ fn pack(
         options: serde_json::Map::new(),
     };
 
-    let mut files: Vec<(&str, &Path)> = vec![(entry.as_str(), file)];
+    let mut files: Vec<(&str, &Path)> = vec![(entry.as_str(), media)];
     if let (Some(pname), Some(ppath)) = (preview_name.as_deref(), preview) {
         files.push((pname, ppath));
     }
@@ -464,6 +496,73 @@ fn sha256_and_size(path: &Path) -> anyhow::Result<(String, u64)> {
     let size = file.metadata()?.len();
     let hex = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok((hex, size))
+}
+
+/// A temp file removed on drop.
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// ffmpeg lookup: explicit override, next to the executable, then the dev
+/// checkout download location (scripts/fetch-ffmpeg.ps1).
+fn ffmpeg_path() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let mut candidates = Vec::new();
+    if let Ok(explicit) = std::env::var("LIMEWALL_FFMPEG") {
+        candidates.push(PathBuf::from(explicit));
+    }
+    if let Ok(current) = std::env::current_exe()
+        && let Some(dir) = current.parent()
+    {
+        candidates.push(dir.join(exe));
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/ffmpeg/unpacked")
+            .join(exe),
+    );
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// Re-encodes `input` to a normalized VP9 loop: caps width at 1920, 30 fps,
+/// yuv420p, and strips metadata and audio (attack surface a wallpaper never
+/// needs).
+fn reencode_video(input: &Path, output: &Path) -> anyhow::Result<()> {
+    let ffmpeg = ffmpeg_path()
+        .context("ffmpeg not found (set LIMEWALL_FFMPEG or run scripts/fetch-ffmpeg.ps1)")?;
+    let status = std::process::Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(input)
+        .args([
+            "-map_metadata",
+            "-1",
+            "-an",
+            "-vf",
+            "scale='min(1920,iw)':-2,format=yuv420p",
+            "-r",
+            "30",
+            "-c:v",
+            "libvpx-vp9",
+            "-b:v",
+            "0",
+            "-crf",
+            "32",
+            "-deadline",
+            "good",
+            "-cpu-used",
+            "3",
+            "-row-mt",
+            "1",
+        ])
+        .arg(output)
+        .status()
+        .context("failed to run ffmpeg")?;
+    anyhow::ensure!(status.success(), "ffmpeg re-encode failed");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -23,10 +23,12 @@
    SHA-256 и размер):
 
    ```
-   cargo run -p renderer -- pack wall.mp4 --name "Aurora Drift" --author "2fame" --license "CC0-1.0" --id aurora-drift --preview preview.jpg -o gallery/packs/aurora-drift/aurora-drift.wpk
+   cargo run -p renderer -- pack wall.mp4 --reencode --name "Aurora Drift" --author "2fame" --license "CC0-1.0" --id aurora-drift --preview preview.jpg -o gallery/packs/aurora-drift/aurora-drift.wpk
    ```
 
-   (Или экспортом из приложения — кнопка «Поделиться .wpk» на карточке.)
+   `--reencode` (для видео) нормализует ролик через ffmpeg — VP9, кап 1920px,
+   срез метаданных и звука, — заодно уменьшая размер. (Или экспортом из
+   приложения — кнопка «Поделиться .wpk».)
 2. **Положите превью** `gallery/packs/aurora-drift/preview.jpg` (опц.) и теги
    `gallery/packs/aurora-drift/tags.json` — массив строк (опц.).
 3. **Сгенерируйте каталог** — SHA-256 и размер посчитаются сами:
