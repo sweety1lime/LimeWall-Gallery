@@ -78,6 +78,12 @@ enum Command {
         #[arg(long, short)]
         out: Option<PathBuf>,
     },
+    /// Print the SHA-256, size and a ready catalog entry for existing `.wpk`
+    /// file(s) — for adding packs you already built to the gallery.
+    Inspect {
+        /// One or more `.wpk` files.
+        files: Vec<PathBuf>,
+    },
     /// Run the long-lived local IPC daemon (phase 2).
     Serve {
         /// Override the per-user local socket name (primarily for tests).
@@ -271,6 +277,7 @@ fn main() -> anyhow::Result<()> {
             id,
             out,
         } => pack(&file, name, author, license, version, preview.as_deref(), id, out),
+        Command::Inspect { files } => inspect(&files),
         Command::Serve { endpoint, state } => daemon::run(endpoint.as_deref(), state.as_deref()),
         Command::Ctl { endpoint, command } => ctl(endpoint.as_deref(), command),
     }
@@ -367,19 +374,78 @@ fn pack(
         .map_err(|error| anyhow::anyhow!("failed to write package: {error}"))?;
 
     let (sha, size) = sha256_and_size(&out)?;
-    let kind = match media_type {
-        wpk::MediaType::Video => "video",
-        wpk::MediaType::Image => "image",
-        _ => unreachable!(),
-    };
+    let filename = out
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("pack.wpk");
     println!("wrote {}", out.display());
     println!("sha256: {sha}");
     println!("size:   {size} bytes");
     println!("\nCatalog entry (set download_url after you upload the .wpk):\n");
-    println!(
-        "{{\n  \"id\": \"{id}\",\n  \"name\": \"{name}\",\n  \"author\": \"{author}\",\n  \"type\": \"{kind}\",\n  \"license\": \"{license}\",\n  \"sha256\": \"{sha}\",\n  \"size\": {size},\n  \"download_url\": \"https://github.com/sweety1lime/LimeWall-Gallery/releases/download/{id}/{id}.wpk\",\n  \"tags\": []\n}}"
-    );
+    print_catalog_entry(&id, &name, &author, media_kind(media_type), &license, &sha, size, filename);
     Ok(())
+}
+
+/// Prints the SHA-256, size and catalog entry for existing `.wpk` file(s).
+fn inspect(files: &[PathBuf]) -> anyhow::Result<()> {
+    anyhow::ensure!(!files.is_empty(), "pass at least one .wpk file");
+    for file in files {
+        let manifest = wpk::read_manifest(file)
+            .map_err(|error| anyhow::anyhow!("{}: {error}", file.display()))?;
+        let (sha, size) = sha256_and_size(file)?;
+        let kind = media_kind(manifest.media_type);
+        if matches!(
+            manifest.media_type,
+            wpk::MediaType::Web | wpk::MediaType::Model3d
+        ) {
+            eprintln!(
+                "warning: {} is type {kind}; the gallery accepts only video/image in v1",
+                file.display()
+            );
+        }
+        let filename = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("pack.wpk");
+        println!("// {}", file.display());
+        print_catalog_entry(
+            &manifest.id,
+            &manifest.name,
+            &manifest.author,
+            kind,
+            &manifest.license,
+            &sha,
+            size,
+            filename,
+        );
+        println!();
+    }
+    Ok(())
+}
+
+fn media_kind(media_type: wpk::MediaType) -> &'static str {
+    match media_type {
+        wpk::MediaType::Video => "video",
+        wpk::MediaType::Image => "image",
+        wpk::MediaType::Web => "web",
+        wpk::MediaType::Model3d => "model3d",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_catalog_entry(
+    id: &str,
+    name: &str,
+    author: &str,
+    kind: &str,
+    license: &str,
+    sha: &str,
+    size: u64,
+    filename: &str,
+) {
+    println!(
+        "{{\n  \"id\": \"{id}\",\n  \"name\": \"{name}\",\n  \"author\": \"{author}\",\n  \"type\": \"{kind}\",\n  \"license\": \"{license}\",\n  \"sha256\": \"{sha}\",\n  \"size\": {size},\n  \"download_url\": \"https://github.com/sweety1lime/LimeWall-Gallery/releases/download/{id}/{filename}\",\n  \"tags\": []\n}}"
+    );
 }
 
 fn sha256_and_size(path: &Path) -> anyhow::Result<(String, u64)> {
