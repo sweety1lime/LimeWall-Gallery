@@ -1,0 +1,12 @@
+# Keep wallpaper binaries byte-for-byte so their SHA-256 stays stable
+# (the gallery client verifies downloads against the catalog checksum).
+*.wpk binary
+*.webm binary
+*.mp4 binary
+*.mkv binary
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.webp binary
+*.glb binary

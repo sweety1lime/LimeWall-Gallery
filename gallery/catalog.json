@@ -1,4 +1,17 @@
 {
   "version": 1,
-  "packs": []
+  "packs": [
+    {
+      "id": "aurora-drift",
+      "name": "Aurora Drift",
+      "author": "LimeWall",
+      "type": "video",
+      "license": "CC0-1.0",
+      "sha256": "ad99189f6f132fb431236f542a659aa4d109872d346fca8511acc28f249b7301",
+      "size": 93641,
+      "preview": "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/packs/aurora-drift/preview.jpg",
+      "download_url": "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/packs/aurora-drift/aurora-drift.wpk",
+      "tags": ["abstract", "green", "cc0"]
+    }
+  ]
 }
