@@ -51,7 +51,7 @@ pub fn ensure_daemon(endpoint: &str) -> Result<String, String> {
 
 /// Renderer executable lookup: explicit override, next to the UI executable
 /// (bundled install), then the development workspace target directory.
-fn renderer_path() -> Option<PathBuf> {
+pub(crate) fn renderer_path() -> Option<PathBuf> {
     let exe_name = if cfg!(windows) {
         "renderer.exe"
     } else {

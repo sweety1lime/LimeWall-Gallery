@@ -1,5 +1,6 @@
 mod assoc;
 mod daemon_client;
+mod diagnostics;
 mod library;
 
 use std::path::{Path, PathBuf};
@@ -29,12 +30,63 @@ fn list_monitors() -> Result<Vec<ipc::Monitor>, String> {
     }
 }
 
+/// Session list plus the wallpaper stack's live CPU% and playlists, for the panel.
+#[derive(serde::Serialize)]
+struct DaemonStatus {
+    sessions: Vec<ipc::SessionStatus>,
+    stack_cpu_percent: Option<f32>,
+    playlists: Vec<ipc::PlaylistSummary>,
+}
+
 #[tauri::command]
-fn daemon_status() -> Result<Vec<ipc::SessionStatus>, String> {
+fn daemon_status() -> Result<DaemonStatus, String> {
     match daemon_client::request(&daemon_client::endpoint(), ipc::Command::Status)? {
-        ipc::ResponseData::Status { sessions } => Ok(sessions),
+        ipc::ResponseData::Status {
+            sessions,
+            stack_cpu_percent,
+            playlists,
+        } => Ok(DaemonStatus {
+            sessions,
+            stack_cpu_percent,
+            playlists,
+        }),
         other => Err(format!("unexpected daemon response: {other:?}")),
     }
+}
+
+#[tauri::command]
+fn set_playlist(
+    monitor: usize,
+    items: Vec<String>,
+    interval_minutes: u32,
+    shuffle: bool,
+    quality: String,
+    volume: u8,
+    anime4k: bool,
+) -> Result<String, String> {
+    let items = items
+        .iter()
+        .map(|s| PathBuf::from(s).canonicalize().unwrap_or_else(|_| PathBuf::from(s)))
+        .collect();
+    acknowledged(ipc::Command::SetPlaylist {
+        monitor,
+        items,
+        interval_minutes,
+        shuffle,
+        quality: parse_quality(&quality)?,
+        volume,
+        anime4k,
+    })
+}
+
+#[tauri::command]
+fn clear_playlist(monitor: Option<usize>) -> Result<String, String> {
+    acknowledged(ipc::Command::ClearPlaylist { monitor })
+}
+
+#[tauri::command]
+fn playlist_next(monitor: Option<usize>) -> Result<String, String> {
+    acknowledged(ipc::Command::PlaylistNext { monitor })
 }
 
 #[tauri::command]
@@ -140,7 +192,7 @@ fn set_battery_policy(policy: String) -> Result<String, String> {
 // library commands (import runs ffmpeg — keep it off the UI thread)
 // ---------------------------------------------------------------------------
 
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     task: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(task)
@@ -176,6 +228,71 @@ async fn library_export(id: String, target: String) -> Result<(), String> {
     blocking(move || library::Library::default_location()?.export(&id, Path::new(&target))).await
 }
 
+#[derive(Clone, serde::Serialize)]
+struct PackageInfo {
+    name: String,
+    kind: String,
+}
+
+fn kind_str(kind: wpk::MediaType) -> &'static str {
+    match kind {
+        wpk::MediaType::Video => "video",
+        wpk::MediaType::Image => "image",
+        wpk::MediaType::Web => "web",
+        wpk::MediaType::Model3d => "model3d",
+    }
+}
+
+/// web / 3D packages ship code that runs on the desktop, so they must never be
+/// installed without the user's explicit consent (see docs/research/security-model.md).
+fn needs_consent(kind: wpk::MediaType) -> bool {
+    matches!(kind, wpk::MediaType::Web | wpk::MediaType::Model3d)
+}
+
+/// Reads a package's manifest so the UI can decide whether to warn before import.
+#[tauri::command]
+async fn inspect_package(path: String) -> Result<PackageInfo, String> {
+    blocking(move || {
+        let manifest = wpk::read_manifest(Path::new(&path)).map_err(|error| error.to_string())?;
+        Ok(PackageInfo {
+            name: manifest.name,
+            kind: kind_str(manifest.media_type).to_owned(),
+        })
+    })
+    .await
+}
+
+/// Locates the bundled first-run sample web wallpaper: portable/installed
+/// layout first (`web/demo` next to the exe), then the dev tree. Mirrors
+/// library's two-tier asset lookup.
+fn bundled_sample_entry() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("web").join("demo").join("index.html"));
+    }
+    candidates
+        .push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../assets/web/demo/index.html"));
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// Imports the bundled first-party sample wallpaper so a fresh library is not
+/// empty. It is our own code shipped inside the install, so it skips the
+/// code-wallpaper consent that foreign `.html`/`.wpk` imports require.
+#[tauri::command]
+async fn import_bundled_sample() -> Result<library::LibraryItem, String> {
+    blocking(|| {
+        let entry = bundled_sample_entry().ok_or("bundled sample wallpaper not found")?;
+        library::Library::default_location()?.import_web_folder_meta(
+            &entry,
+            Some("Аврора — пример".to_owned()),
+            Some("LimeWall".to_owned()),
+        )
+    })
+    .await
+}
+
 /// `.wpk` files among command line arguments (double-click / "open with").
 fn packages_in(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::path::PathBuf> {
     args.skip(1)
@@ -188,7 +305,20 @@ fn packages_in(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::path:
         .collect()
 }
 
+#[derive(Clone, serde::Serialize)]
+struct ConsentRequest {
+    path: String,
+    name: String,
+    kind: String,
+}
+
 /// Imports packages off the UI thread and tells the panel to refresh.
+///
+/// Plain media (video / image) is imported directly — double-clicking a video
+/// `.wpk` just works. Code-bearing packages (web / 3D) and any package whose
+/// manifest cannot be read are never imported silently: the UI is asked for
+/// explicit consent first (fail-safe — a missed event means no import, not a
+/// silent one).
 fn import_packages(app: tauri::AppHandle, packages: Vec<std::path::PathBuf>) {
     use tauri::Emitter;
     if packages.is_empty() {
@@ -202,15 +332,43 @@ fn import_packages(app: tauri::AppHandle, packages: Vec<std::path::PathBuf>) {
                 return;
             }
         };
+        let mut imported = false;
         for package in packages {
-            match library.import(&package) {
-                Ok(item) => println!("imported {} from {}", item.name, package.display()),
+            let consent = match wpk::read_manifest(&package) {
+                Ok(manifest) if needs_consent(manifest.media_type) => Some(ConsentRequest {
+                    path: package.display().to_string(),
+                    name: manifest.name,
+                    kind: kind_str(manifest.media_type).to_owned(),
+                }),
+                Ok(_) => None,
                 Err(error) => {
-                    eprintln!("failed to import {}: {error}", package.display());
+                    eprintln!("cannot classify {}: {error}", package.display());
+                    Some(ConsentRequest {
+                        path: package.display().to_string(),
+                        name: package
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("пакет")
+                            .to_owned(),
+                        kind: "unknown".to_owned(),
+                    })
                 }
+            };
+            if let Some(request) = consent {
+                let _ = app.emit("wpk-consent", request);
+                continue;
+            }
+            match library.import(&package) {
+                Ok(item) => {
+                    println!("imported {} from {}", item.name, package.display());
+                    imported = true;
+                }
+                Err(error) => eprintln!("failed to import {}: {error}", package.display()),
             }
         }
-        let _ = app.emit("library-changed", ());
+        if imported {
+            let _ = app.emit("library-changed", ());
+        }
     });
 }
 
@@ -251,6 +409,12 @@ pub fn run() {
             library_remove,
             library_preview,
             library_export,
+            inspect_package,
+            import_bundled_sample,
+            diagnostics::run_diagnostics,
+            set_playlist,
+            clear_playlist,
+            playlist_next,
         ])
         .setup(|app| {
             // Double-clicking a .wpk should land here (per-user, no admin).
@@ -262,4 +426,19 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_code_bearing_packages_require_consent() {
+        // web / 3D run code on the desktop -> must ask the user first.
+        assert!(needs_consent(wpk::MediaType::Web));
+        assert!(needs_consent(wpk::MediaType::Model3d));
+        // plain media is inert -> import silently.
+        assert!(!needs_consent(wpk::MediaType::Video));
+        assert!(!needs_consent(wpk::MediaType::Image));
+    }
 }

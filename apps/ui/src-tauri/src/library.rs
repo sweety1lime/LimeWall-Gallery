@@ -165,6 +165,17 @@ impl Library {
     /// Imports a bare HTML file by copying its containing folder into the
     /// library as a web wallpaper. Guards against packaging a huge folder.
     fn import_web_folder(&self, entry: &Path) -> Result<LibraryItem, String> {
+        self.import_web_folder_meta(entry, None, None)
+    }
+
+    /// As [`import_web_folder`], with optional name/author overrides. Used by the
+    /// bundled first-run sample so it carries a friendly name and "LimeWall".
+    pub(crate) fn import_web_folder_meta(
+        &self,
+        entry: &Path,
+        name_override: Option<String>,
+        author: Option<String>,
+    ) -> Result<LibraryItem, String> {
         let folder = entry.parent().ok_or("HTML file has no parent folder")?;
         let entry_name = entry
             .file_name()
@@ -179,13 +190,15 @@ impl Library {
         }
         let _ = fs::remove_dir_all(&dir);
         copy_folder_guarded(folder, &dir)?;
-        let name = entry
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("web wallpaper")
-            .to_owned();
-        let item = self.web_item(id, name, dir.join(&entry_name), None, None, None);
+        let name = name_override.unwrap_or_else(|| {
+            entry
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("web wallpaper")
+                .to_owned()
+        });
+        let item = self.web_item(id, name, dir.join(&entry_name), None, author, None);
         index.push(item.clone());
         self.save_index(&index)?;
         Ok(item)
@@ -637,7 +650,7 @@ fn run_ffmpeg(mut command: Command) -> Result<(), String> {
 
 /// ffmpeg lookup: explicit override, next to the UI executable (bundled
 /// install), then the development checkout download location.
-fn ffmpeg_path() -> Option<PathBuf> {
+pub(crate) fn ffmpeg_path() -> Option<PathBuf> {
     let exe_name = if cfg!(windows) {
         "ffmpeg.exe"
     } else {
@@ -859,5 +872,25 @@ mod tests {
         library.remove(&item.id).expect("remove");
         assert!(!dir.exists(), "web folder deleted");
         assert!(library.list().expect("list").is_empty());
+    }
+
+    #[test]
+    fn web_folder_meta_overrides_name_and_author() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let library = Library::at(temp.path().join("library"));
+        let site = temp.path().join("demo");
+        fs::create_dir_all(&site).expect("mkdir");
+        fs::write(site.join("index.html"), b"<html></html>").expect("entry");
+
+        let item = library
+            .import_web_folder_meta(
+                &site.join("index.html"),
+                Some("Аврора — пример".to_owned()),
+                Some("LimeWall".to_owned()),
+            )
+            .expect("meta import");
+        assert_eq!(item.name, "Аврора — пример");
+        assert_eq!(item.author.as_deref(), Some("LimeWall"));
+        assert_eq!(item.kind, MediaKind::Web);
     }
 }

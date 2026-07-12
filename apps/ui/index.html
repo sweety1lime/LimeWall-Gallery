@@ -9,87 +9,36 @@
   </head>
 
   <body>
-    <main class="container">
-      <header class="row header">
-        <h1>LimeWall <span class="brand">by 2fame</span></h1>
-        <div class="daemon">
-          <span id="daemon-state" class="state offline">
-            <span class="dot"></span><span id="daemon-text">нет связи</span>
+    <div class="app">
+      <!-- Custom titlebar (window has no native decorations) -->
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="tb-left" data-tauri-drag-region>
+          <span id="tb-logo" class="tb-logo"></span>
+          <span class="tb-title">LimeWall</span>
+          <span class="tb-brand">by 2fame</span>
+        </div>
+        <div class="tb-right">
+          <span id="conn" class="conn">
+            <span class="conn-dot"></span>
+            <span id="conn-text">…</span>
           </span>
-          <button id="connect" type="button" hidden>Подключить</button>
+          <button id="settings-open" class="icon-btn" type="button" title="Настройки"></button>
+          <div class="win-controls">
+            <button id="win-min" class="win-btn" type="button" title="Свернуть"></button>
+            <button id="win-max" class="win-btn" type="button" title="Развернуть"></button>
+            <button id="win-close" class="win-btn win-close" type="button" title="Закрыть"></button>
+          </div>
         </div>
       </header>
 
-      <section id="now-playing" class="panel now-playing" hidden>
-        <h2>Сейчас на рабочем столе</h2>
-        <div id="sessions" class="sessions"></div>
-      </section>
+      <!-- State views are built here by main.ts: offline | empty | populated -->
+      <main id="content" class="content"></main>
+    </div>
 
-      <section class="panel">
-        <div class="row panel-head">
-          <h2>Библиотека</h2>
-          <button id="import" type="button" class="primary">＋ Добавить</button>
-        </div>
-        <div id="library" class="library"></div>
-        <div id="dropzone" class="dropzone">
-          <div class="dropzone-icon">🖼</div>
-          <p>Перетащите сюда видео, GIF или картинку —<br />или нажмите «Добавить»</p>
-          <p class="hint">Кликните по любой карточке, чтобы поставить её на рабочий стол</p>
-        </div>
-      </section>
+    <!-- Settings slide-over -->
+    <div id="settings" class="settings-overlay" hidden></div>
 
-      <section class="panel">
-        <div class="options-grid">
-          <label class="option" id="monitor-option">
-            <span class="option-name">Монитор</span>
-            <span id="monitors" class="chips"></span>
-          </label>
-          <label class="option" title="Экономия — минимальная нагрузка; Максимум — улучшение картинки, если исходник меньше экрана">
-            <span class="option-name">Качество</span>
-            <select id="quality">
-              <option value="eco">Экономия</option>
-              <option value="balanced" selected>Баланс</option>
-              <option value="max">Максимум</option>
-            </select>
-          </label>
-          <label
-            class="option checkbox"
-            title="Улучшайзер для рисованного контента (аниме). Для обычного видео оставьте выключенным"
-          >
-            <input id="anime4k" type="checkbox" />
-            <span class="option-name">Аниме-режим</span>
-          </label>
-          <label class="option volume" title="У GIF и картинок звука нет — ползунок на них не влияет">
-            <span class="option-name">Звук</span>
-            <input id="volume" type="range" min="0" max="100" value="0" />
-            <span id="volume-value" class="option-name">выкл</span>
-          </label>
-        </div>
-      </section>
-
-      <details class="panel settings">
-        <summary>Настройки</summary>
-        <div class="options-grid">
-          <label class="option checkbox">
-            <input id="autostart" type="checkbox" disabled />
-            <span class="option-name">Запускать вместе с Windows</span>
-          </label>
-          <label class="option" title="Что делать с обоями, когда ноутбук работает от батареи">
-            <span class="option-name">От батареи</span>
-            <select id="battery" disabled>
-              <option value="pause" selected>Ставить на паузу</option>
-              <option value="eco">Снижать качество</option>
-              <option value="keep">Играть как обычно</option>
-            </select>
-          </label>
-        </div>
-        <p class="hint">
-          Обои сами встают на паузу за полноэкранной игрой, на экране блокировки и при
-          выключенном мониторе — и сами продолжаются.
-        </p>
-      </details>
-
-      <p id="message" class="message"></p>
-    </main>
+    <!-- Transient status / error toast -->
+    <div id="toast" class="toast" hidden></div>
   </body>
 </html>

@@ -14,10 +14,11 @@
     "windows": [
       {
         "title": "LimeWall",
-        "width": 860,
-        "height": 640,
-        "minWidth": 640,
-        "minHeight": 480
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 620,
+        "decorations": false
       }
     ],
     "security": {
