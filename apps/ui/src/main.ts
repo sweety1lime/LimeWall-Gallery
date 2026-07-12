@@ -653,6 +653,11 @@ function buildEmpty(): HTMLElement {
           iconSpan(icons.play),
           "Начать с примера",
         ),
+        h(
+          "button",
+          { class: "btn-ghost", type: "button", onClick: () => openGallery() },
+          "Открыть каталог",
+        ),
       ),
     ),
   );
