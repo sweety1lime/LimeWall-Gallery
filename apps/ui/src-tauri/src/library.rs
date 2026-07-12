@@ -829,8 +829,14 @@ mod tests {
         assert!(item.file.ends_with("viewer.html"));
         let dir = item.file.parent().unwrap();
         assert!(dir.join("Box.glb").is_file(), "model kept");
-        assert!(dir.join("three.module.min.js").is_file(), "three.js installed");
-        assert!(dir.join("loaders/GLTFLoader.js").is_file(), "loader installed");
+        assert!(
+            dir.join("three.module.min.js").is_file(),
+            "three.js installed"
+        );
+        assert!(
+            dir.join("loaders/GLTFLoader.js").is_file(),
+            "loader installed"
+        );
         let viewer = fs::read_to_string(&item.file).expect("viewer");
         assert!(viewer.contains("Box.glb"), "viewer references the model");
         assert!(!viewer.contains("__MODEL__"), "placeholder replaced");
@@ -848,7 +854,9 @@ mod tests {
         fs::write(site.join("index.html"), b"<html><body>hi</body></html>").expect("entry");
         fs::write(site.join("assets/app.js"), b"console.log(1)").expect("asset");
 
-        let item = library.import(&site.join("index.html")).expect("web import");
+        let item = library
+            .import(&site.join("index.html"))
+            .expect("web import");
         assert_eq!(item.kind, MediaKind::Web);
         assert!(item.file.ends_with("index.html"));
         assert!(item.file.is_file(), "entry copied into the library");
@@ -865,7 +873,14 @@ mod tests {
         let second = Library::at(temp.path().join("library2"));
         let restored = second.import(&package).expect("web wpk import");
         assert_eq!(restored.kind, MediaKind::Web);
-        assert!(restored.file.parent().unwrap().join("assets/app.js").is_file());
+        assert!(
+            restored
+                .file
+                .parent()
+                .unwrap()
+                .join("assets/app.js")
+                .is_file()
+        );
 
         // Removal deletes the whole web folder.
         let dir = item.file.parent().unwrap().to_path_buf();

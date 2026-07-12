@@ -44,10 +44,16 @@ fn collect() -> DiagReport {
 
     // Daemon: raw ping, never `ensure_daemon` — diagnostics observe, not spawn.
     match daemon_client::request(&endpoint, ipc::Command::Ping) {
-        Ok(ipc::ResponseData::Pong { daemon_version }) => {
-            checks.push(check("daemon", "pass", format!("работает, версия {daemon_version}")))
-        }
-        Ok(other) => checks.push(check("daemon", "warn", format!("неожиданный ответ: {other:?}"))),
+        Ok(ipc::ResponseData::Pong { daemon_version }) => checks.push(check(
+            "daemon",
+            "pass",
+            format!("работает, версия {daemon_version}"),
+        )),
+        Ok(other) => checks.push(check(
+            "daemon",
+            "warn",
+            format!("неожиданный ответ: {other:?}"),
+        )),
         Err(error) => checks.push(check("daemon", "fail", format!("нет ответа: {error}"))),
     }
 
@@ -147,7 +153,11 @@ fn collect() -> DiagReport {
         Ok(ipc::ResponseData::Autostart { enabled }) => checks.push(check(
             "autostart",
             "info",
-            if enabled { "включён" } else { "выключен" },
+            if enabled {
+                "включён"
+            } else {
+                "выключен"
+            },
         )),
         Ok(_) | Err(_) => checks.push(check("autostart", "warn", "не удалось прочитать")),
     }
@@ -187,7 +197,8 @@ fn state_word(state: ipc::PlaybackState) -> &'static str {
 /// libmpv-2.dll next to the renderer exe (bundled) or in the dev checkout.
 fn libmpv_path() -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(dir) = daemon_client::renderer_path().and_then(|p| p.parent().map(Path::to_path_buf))
+    if let Some(dir) =
+        daemon_client::renderer_path().and_then(|p| p.parent().map(Path::to_path_buf))
     {
         candidates.push(dir.join("libmpv-2.dll"));
     }

@@ -1,6 +1,7 @@
 mod assoc;
 mod daemon_client;
 mod diagnostics;
+mod gallery;
 mod library;
 
 use std::path::{Path, PathBuf};
@@ -66,7 +67,11 @@ fn set_playlist(
 ) -> Result<String, String> {
     let items = items
         .iter()
-        .map(|s| PathBuf::from(s).canonicalize().unwrap_or_else(|_| PathBuf::from(s)))
+        .map(|s| {
+            PathBuf::from(s)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(s))
+        })
         .collect();
     acknowledged(ipc::Command::SetPlaylist {
         monitor,
@@ -272,8 +277,9 @@ fn bundled_sample_entry() -> Option<PathBuf> {
     {
         candidates.push(dir.join("web").join("demo").join("index.html"));
     }
-    candidates
-        .push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../assets/web/demo/index.html"));
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../assets/web/demo/index.html"),
+    );
     candidates.into_iter().find(|path| path.is_file())
 }
 
@@ -415,6 +421,8 @@ pub fn run() {
             set_playlist,
             clear_playlist,
             playlist_next,
+            gallery::gallery_fetch_catalog,
+            gallery::gallery_download,
         ])
         .setup(|app| {
             // Double-clicking a .wpk should land here (per-user, no admin).

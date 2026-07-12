@@ -25,6 +25,7 @@ platform = { path = "../../../crates/platform" }
 base64 = "0.22"
 dirs = "6"
 sha2 = "0.10"
+ureq = "2"
 tauri-plugin-single-instance = "2.4.2"
 
 [target.'cfg(windows)'.dependencies]

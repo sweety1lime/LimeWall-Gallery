@@ -56,6 +56,19 @@ interface PlaylistSummary {
   shuffle: boolean;
 }
 
+interface GalleryPack {
+  id: string;
+  name: string;
+  author: string;
+  type: string;
+  license: string;
+  sha256: string;
+  size: number;
+  preview?: string | null;
+  download_url: string;
+  tags: string[];
+}
+
 interface DaemonStatus {
   sessions: SessionStatus[];
   stack_cpu_percent: number | null;
@@ -152,6 +165,11 @@ let settingsOpen = false;
 let heroId: string | null = null;
 let diagReport: DiagReport | null = null;
 let diagRunning = false;
+let galleryOpen = false;
+let galleryPacks: GalleryPack[] = [];
+let galleryLoading = false;
+let galleryError: string | null = null;
+const galleryDownloaded = new Set<string>();
 
 // Control values for the selected monitor: UI-owned, used at play time and
 // pushed live to an active session. Adopted from a session on monitor switch.
@@ -406,11 +424,141 @@ function renderContent() {
   content.replaceChildren();
   if (!connected) {
     content.append(buildOffline());
+  } else if (galleryOpen) {
+    content.append(buildGallery());
   } else if (libraryItems.length === 0) {
     content.append(buildEmpty());
   } else {
     content.append(buildPopulated());
     markActiveCards();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// gallery (community catalog)
+// ---------------------------------------------------------------------------
+
+function openGallery() {
+  if (!connected) return;
+  galleryOpen = true;
+  renderContent();
+  if (galleryPacks.length === 0 && !galleryLoading && galleryError === null) void loadGallery();
+}
+
+async function loadGallery() {
+  galleryLoading = true;
+  galleryError = null;
+  renderContent();
+  try {
+    galleryPacks = await invoke<GalleryPack[]>("gallery_fetch_catalog");
+  } catch {
+    galleryError = "Не удалось загрузить каталог. Проверьте интернет и попробуйте ещё раз.";
+    galleryPacks = [];
+  } finally {
+    galleryLoading = false;
+    renderContent();
+  }
+}
+
+function buildGallery(): HTMLElement {
+  const head = h(
+    "div",
+    { class: "gallery-head" },
+    h(
+      "button",
+      { class: "btn-ghost small", type: "button", onClick: () => { galleryOpen = false; renderContent(); } },
+      "← Библиотека",
+    ),
+    h("div", { class: "gallery-title" }, "Каталог обоев"),
+    h(
+      "button",
+      { class: "btn-ghost small", type: "button", onClick: () => void loadGallery() },
+      "Обновить",
+    ),
+  );
+
+  const body = h("div", { class: "grid-scroll" });
+  if (galleryLoading) {
+    body.append(h("div", { class: "grid-empty" }, "Загружаю каталог…"));
+  } else if (galleryError) {
+    body.append(h("div", { class: "grid-empty" }, galleryError));
+  } else if (galleryPacks.length === 0) {
+    body.append(
+      h(
+        "div",
+        { class: "grid-empty" },
+        "Каталог пока пуст. Загляните позже — или предложите свои обои через GitHub.",
+      ),
+    );
+  } else {
+    const grid = h("div", { class: "grid" });
+    for (const pack of galleryPacks) grid.append(renderGalleryCard(pack));
+    body.append(grid);
+  }
+
+  return h("div", { class: "gallery" }, head, body);
+}
+
+function renderGalleryCard(pack: GalleryPack): HTMLElement {
+  const kind = (["video", "image", "web", "model3d"].includes(pack.type) ? pack.type : "video") as Kind;
+  const type = TYPE_META[kind];
+
+  const thumb = h(
+    "div",
+    { class: "card-thumb gradient" },
+    h("span", { class: "card-type type-badge " + type.cls }, type.label),
+  );
+  thumb.style.backgroundImage = gradientFor(pack.id);
+  if (pack.preview) {
+    const img = new Image();
+    const url = pack.preview;
+    img.onload = () => {
+      thumb.style.backgroundImage = `url("${url}")`;
+      thumb.classList.remove("gradient");
+    };
+    img.src = url;
+  }
+
+  const done = galleryDownloaded.has(pack.id);
+  const dlBtn = h(
+    "button",
+    {
+      class: "gallery-dl" + (done ? " done" : ""),
+      type: "button",
+      onClick: (e: Event) => {
+        e.stopPropagation();
+        if (!done) void downloadPack(pack);
+      },
+    },
+    done ? "✓ В библиотеке" : "Скачать",
+  );
+
+  const foot = h(
+    "div",
+    { class: "card-foot" },
+    h(
+      "div",
+      { class: "card-foot-info" },
+      h("div", { class: "card-name", title: pack.name }, pack.name),
+      h("div", { class: "card-author" }, `${pack.author} · ${pack.license}`),
+    ),
+    dlBtn,
+  );
+
+  return h("div", { class: "card gallery-card" }, thumb, foot);
+}
+
+async function downloadPack(pack: GalleryPack) {
+  report(`Скачиваю «${pack.name}»…`);
+  try {
+    const item = await call<LibraryItem>("gallery_download", { pack });
+    galleryDownloaded.add(pack.id);
+    report(`«${item.name}» добавлено в библиотеку`);
+    // refreshLibrary → renderContent; galleryOpen is still true so it redraws
+    // the gallery with this card now marked as downloaded.
+    await refreshLibrary();
+  } catch {
+    // error text is already shown by call()
   }
 }
 
@@ -1460,6 +1608,7 @@ function wireTitlebar() {
   max.addEventListener("click", () => void win.toggleMaximize());
   close.addEventListener("click", () => void win.close());
   document.getElementById("settings-open")!.addEventListener("click", () => openSettings());
+  document.getElementById("gallery-open")!.addEventListener("click", () => openGallery());
 }
 
 // ---------------------------------------------------------------------------
