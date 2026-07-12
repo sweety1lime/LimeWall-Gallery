@@ -18,7 +18,7 @@ $vendorLicenses = Join-Path $repoRoot "licenses\vendor"
 if (-not (Test-Path (Join-Path $vendorLicenses "lgpl-3.0.txt"))) {
     Write-Host "fetching GNU license texts..."
     try { & (Join-Path $PSScriptRoot "fetch-licenses.ps1") }
-    catch { Write-Warning "could not fetch license texts (offline?): $_ — bundling notice only" }
+    catch { Write-Warning "could not fetch license texts (offline?): $_ - bundling notice only" }
 }
 
 Write-Host "building renderer (release)..."
@@ -58,7 +58,7 @@ Copy-Item (Join-Path $repoRoot "licenses\THIRD-PARTY-NOTICES.md") $licensesOut -
 if (Test-Path $vendorLicenses) {
     Copy-Item (Join-Path $vendorLicenses "*.txt") $licensesOut -Force
 } else {
-    Write-Warning "GNU license texts missing — run scripts/fetch-licenses.ps1 before a public release"
+    Write-Warning "GNU license texts missing - run scripts/fetch-licenses.ps1 before a public release"
 }
 
 Write-Host ""
