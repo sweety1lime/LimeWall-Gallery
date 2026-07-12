@@ -1,0 +1,23 @@
+name: gallery-validate
+
+# Validates catalog changes on any PR (and push) touching the gallery. This is
+# the automated moderation gate: structure + policy checks before human review.
+# Fuller pipeline (re-encode media through ffmpeg, publish the .wpk to a Release,
+# regenerate the catalog) lands here as a follow-up — see docs/research/workshop.md.
+
+on:
+  pull_request:
+    paths: ["gallery/**"]
+  push:
+    paths: ["gallery/**"]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Validate catalog.json
+        run: node gallery/validate.mjs
