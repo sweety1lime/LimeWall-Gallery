@@ -260,6 +260,9 @@ fn parse_color(s: &str) -> Result<Rgb, String> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Harden the process before loading libmpv / WebView2 (see
+    // docs/research/renderer-sandbox.md). Best-effort, no-op off Windows.
+    platform::harden_process();
     let cli = Cli::parse();
     match cli.command {
         Command::TestSurface { monitor, color } => test_surface(monitor, color),

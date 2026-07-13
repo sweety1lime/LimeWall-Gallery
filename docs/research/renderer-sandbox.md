@@ -108,8 +108,11 @@ WorkerW/WebView2. Эффект скромный, но реальный и мал
 
 ## Рекомендация
 
-1. **Фаза 1 (сейчас, низкий риск)** — навесить совместимые process-mitigation
-   policies (таблица D) + собрать `renderer` с CFG. `crates/platform` (Windows).
+1. **Фаза 1 (сейчас, низкий риск) — ✅ сделано.** Совместимые process-mitigation
+   policies (extension-point-disable + image-load: no-remote / no-low-label /
+   prefer-system32) применяются в `platform::harden_process()`
+   (`crates/platform/src/harden_win32.rs`), вызывается первым в `renderer` main;
+   CFG включён для Windows-MSVC сборок через `.cargo/config.toml`.
 2. **Web/3D** — оставить как есть: песочница WebView2 + CSP; ничего не ослаблять.
 3. **Фаза 2 (перед UGC / когда оправдано)** — вынести декодер в
    AppContainer-child через libmpv render API + shared-texture; host держит

@@ -73,9 +73,9 @@
    integrity / AppContainer, без записи в ФС вне кэша. Наивысший рычаг после
    сетевого запрета. **Исследовано:** [renderer-sandbox.md](renderer-sandbox.md)
    — полный AppContainer на весь процесс отклонён (UIPI ломает `SetParent` в
-   WorkerW); путь — process-mitigation policies сейчас (Фаза 1) + вынос декодера
-   libmpv в AppContainer-child через render API позже (Фаза 2); web уже закрыт
-   песочницей WebView2.
+   WorkerW); путь — process-mitigation policies (**Фаза 1 ✅ сделано:**
+   `platform::harden_process()` + CFG) + вынос декодера libmpv в AppContainer-
+   child через render API позже (Фаза 2); web уже закрыт песочницей WebView2.
 2. **Badge доверия в UI** (частично закрыто консентом выше): помечать импортированные
    web/3D-обои как «не проверено» до появления подписи/официальной галереи.
 3. **Watchdog: GPU-бюджет и настройки.** CPU-бюджет и причина паузы уже есть;

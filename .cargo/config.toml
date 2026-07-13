@@ -1,0 +1,7 @@
+# Control Flow Guard on Windows (MSVC) builds: an exploit that corrupts a code
+# pointer can no longer redirect an indirect call to an arbitrary address. Cheap,
+# broadly compatible hardening for the renderer that plays untrusted media.
+# See docs/research/renderer-sandbox.md (Phase 1). Applies to every crate built
+# in this workspace and the Tauri UI (config is discovered by directory walk).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "control-flow-guard"]

@@ -120,6 +120,8 @@ pub trait WallpaperHost {
 #[cfg(windows)]
 mod autostart_win32;
 #[cfg(windows)]
+mod harden_win32;
+#[cfg(windows)]
 mod resources_win32;
 #[cfg(windows)]
 mod tray_win32;
@@ -143,6 +145,17 @@ pub fn create_host() -> Result<Box<dyn WallpaperHost>> {
         Err(HostError::Unsupported(
             "only Windows is targeted in phase 0",
         ))
+    }
+}
+
+/// Applies the process-mitigation policies compatible with the renderer's stack
+/// (see docs/research/renderer-sandbox.md). Best-effort, idempotent, and a no-op
+/// on non-Windows. Call once, as early as possible in `main`, before libmpv or
+/// WebView2 are loaded.
+pub fn harden_process() {
+    #[cfg(windows)]
+    {
+        harden_win32::harden_process();
     }
 }
 
