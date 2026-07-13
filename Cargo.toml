@@ -6,7 +6,7 @@ members = ["crates/ipc", "crates/mpv", "crates/platform", "crates/renderer", "cr
 exclude = ["apps/ui/src-tauri"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-beta"
 edition = "2024"
 publish = false
 
