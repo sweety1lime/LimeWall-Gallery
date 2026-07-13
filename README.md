@@ -1,5 +1,7 @@
 # LimeWall
 
+**English** · [Русский](README.ru.md)
+
 Cross-platform live wallpaper engine by 2fame. Windows first (Linux → macOS
 later). Renders video / GIF (→ mp4) / images / HTML / glTF behind the desktop
 icons at minimal system cost, with GPU-side upscaling.
@@ -38,12 +40,13 @@ Still in active development — not a released product yet.
 
 ## Build & run
 
-One-time setup for playback (pinned LGPL builds; see
-[docs/third-party.md](docs/third-party.md)):
+One-time setup — playback runtimes (pinned LGPL builds) and the license texts
+that ship with them; see [docs/third-party.md](docs/third-party.md):
 
 ```
 scripts\fetch-libmpv.ps1
 scripts\fetch-ffmpeg.ps1
+scripts\fetch-licenses.ps1
 ```
 
 CLI playback and the daemon:
