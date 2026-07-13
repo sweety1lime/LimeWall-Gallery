@@ -50,6 +50,8 @@ Copy-Item (Join-Path $repoRoot "assets\shaders\FSR.glsl") (Join-Path $out "shade
 Copy-Item (Join-Path $repoRoot "assets\shaders\anime4k\*.glsl") (Join-Path $out "shaders\anime4k") -Force
 # Sample web wallpaper for testing.
 Copy-Item (Join-Path $repoRoot "assets\web") (Join-Path $out "web") -Recurse -Force
+# Instructions for beta testers, copied verbatim (keeps its UTF-8 bytes intact).
+Copy-Item (Join-Path $repoRoot "packaging\README-portable.txt") (Join-Path $out "README.txt") -Force
 
 # Third-party license notices (LGPL binaries above + MIT shaders/three.js).
 $licensesOut = Join-Path $out "licenses"
