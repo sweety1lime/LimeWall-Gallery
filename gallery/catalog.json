@@ -16,6 +16,38 @@
         "green",
         "cc0"
       ]
+    },
+    {
+      "id": "ember-haze",
+      "name": "Ember Haze",
+      "author": "2fame",
+      "type": "video",
+      "license": "CC0-1.0",
+      "sha256": "eb0a53b79bd973e65cc17f08ec218445e00d2c1d0d8cdd537429cea8e07512a6",
+      "size": 406061,
+      "preview": "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/packs/ember-haze/preview.jpg",
+      "download_url": "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/packs/ember-haze/ember-haze.wpk",
+      "tags": [
+        "abstract",
+        "warm",
+        "cc0"
+      ]
+    },
+    {
+      "id": "nebula-drift",
+      "name": "Nebula Drift",
+      "author": "2fame",
+      "type": "video",
+      "license": "CC0-1.0",
+      "sha256": "65ad810c8ffe2e299275eeded52d2a17365e017e0d0283e7a32ef625e2ca3dad",
+      "size": 345987,
+      "preview": "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/packs/nebula-drift/preview.jpg",
+      "download_url": "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/packs/nebula-drift/nebula-drift.wpk",
+      "tags": [
+        "abstract",
+        "blue",
+        "cc0"
+      ]
     }
   ]
 }
