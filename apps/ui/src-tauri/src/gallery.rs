@@ -24,12 +24,24 @@ const CATALOG_URL: &str =
 /// Where the revocation list lives. Overridable for local testing.
 const REVOCATION_URL: &str =
     "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/revocation.json";
+/// Detached Ed25519 signature over the exact bytes of `catalog.json`.
+const SIGNATURE_URL: &str =
+    "https://raw.githubusercontent.com/sweety1lime/LimeWall-Gallery/master/gallery/catalog.json.sig";
 /// Catalogs above this are rejected as hostile.
 const MAX_CATALOG_BYTES: u64 = 4 * 1024 * 1024;
 /// The revocation list is tiny; anything larger is bogus.
 const MAX_REVOCATION_BYTES: u64 = 1024 * 1024;
+/// An Ed25519 signature is 64 bytes; base64 with slack.
+const MAX_SIGNATURE_BYTES: u64 = 4096;
 /// Per-pack download cap (mirrors the web-folder limit in `library`).
 const MAX_PACK_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Ed25519 public key that signs the catalog, **compiled into** the client.
+/// Empty (comments only) until `gallery/keygen.mjs` is run — then catalog
+/// verification is enforced. Baking the key in rather than fetching it is the
+/// point: a repository compromise cannot swap the key already shipped in a
+/// binary, so a forged catalog is rejected on machines built before the breach.
+const PUBKEY_FILE: &str = include_str!("../../../../gallery/pubkey.ed25519");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GalleryPack {
@@ -85,6 +97,57 @@ fn catalog_url() -> String {
 
 fn revocation_url() -> String {
     std::env::var("LIMEWALL_REVOCATION_URL").unwrap_or_else(|_| REVOCATION_URL.to_owned())
+}
+
+fn signature_url() -> String {
+    std::env::var("LIMEWALL_CATALOG_SIG_URL").unwrap_or_else(|_| SIGNATURE_URL.to_owned())
+}
+
+/// The configured signing key, or `None` when signing is not enabled. The file
+/// holds `#` comments and blank lines plus, once enabled, one base64 line of the
+/// 32-byte Ed25519 public key.
+fn parse_pubkey(content: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(line).ok()?;
+    (bytes.len() == 32).then_some(bytes)
+}
+
+/// Verifies an Ed25519 signature over `message`. Uses ring, already in the tree
+/// via rustls, so no new crypto dependency is added.
+fn verify_ed25519(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key)
+        .verify(message, signature)
+        .is_ok()
+}
+
+/// Enforces the catalog signature. When signing is not enabled (empty key) this
+/// is a no-op and the client keeps trusting HTTPS + per-pack SHA-256. When it is
+/// enabled, a missing or invalid signature rejects the whole catalog — a
+/// repo-compromised or tampered catalog cannot be served to an updated client.
+fn verify_catalog_signature(catalog: &[u8]) -> Result<(), String> {
+    use base64::Engine;
+    let Some(public_key) = parse_pubkey(PUBKEY_FILE) else {
+        return Ok(()); // signing not enabled yet
+    };
+    let signature = http_get_bytes(&signature_url(), MAX_SIGNATURE_BYTES)
+        .map_err(|_| "каталог подписан, но подпись недоступна — отклонено".to_owned())?;
+    let signature = String::from_utf8(signature)
+        .ok()
+        .and_then(|text| {
+            base64::engine::general_purpose::STANDARD
+                .decode(text.trim())
+                .ok()
+        })
+        .ok_or("подпись каталога повреждена — отклонено")?;
+    if verify_ed25519(&public_key, catalog, &signature) {
+        Ok(())
+    } else {
+        Err("подпись каталога недействительна — отклонено".to_owned())
+    }
 }
 
 /// Only our own GitHub-hosted files may be fetched, so a tampered catalog can't
@@ -226,6 +289,8 @@ fn apply_revocation(revocation: &Revocation) -> Result<Vec<String>, String> {
 pub async fn gallery_fetch_catalog() -> Result<CatalogView, String> {
     crate::blocking(|| {
         let bytes = http_get_bytes(&catalog_url(), MAX_CATALOG_BYTES)?;
+        // Verify the signature over the exact fetched bytes before parsing.
+        verify_catalog_signature(&bytes)?;
         let body = String::from_utf8(bytes).map_err(|error| error.to_string())?;
         let packs = parse_catalog(&body)?;
         let revocation = fetch_revocation();
@@ -383,5 +448,50 @@ mod tests {
     fn no_revocations_means_no_ids() {
         assert!(revoked_ids(&Revocation::default()).is_empty());
         assert!(revoked_hashes(&Revocation::default()).is_empty());
+    }
+
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn verify_ed25519_accepts_rfc8032_vector_and_rejects_tampering() {
+        // RFC 8032 section 7.1, test vector 1 (empty message).
+        let public_key =
+            hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        let signature = hex(
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+        );
+        assert!(verify_ed25519(&public_key, b"", &signature));
+
+        let mut tampered = signature.clone();
+        tampered[0] ^= 1;
+        assert!(!verify_ed25519(&public_key, b"", &tampered));
+        assert!(!verify_ed25519(&public_key, b"different", &signature));
+    }
+
+    #[test]
+    fn parse_pubkey_ignores_comments_and_requires_32_bytes() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        assert!(parse_pubkey("").is_none());
+        assert!(parse_pubkey("# only a comment\n\n").is_none());
+        assert!(parse_pubkey("not valid base64 !!").is_none());
+        // Wrong length is rejected.
+        assert!(parse_pubkey(&b64.encode([0u8; 16])).is_none());
+        // A real 32-byte key after a comment parses back to its bytes.
+        let key = hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        let file = format!("# LimeWall gallery key\n{}\n", b64.encode(&key));
+        assert_eq!(parse_pubkey(&file), Some(key));
+    }
+
+    #[test]
+    fn signing_is_disabled_by_default() {
+        // The committed key file ships empty, so the shipped client enforces
+        // nothing extra until keygen is run.
+        assert!(parse_pubkey(PUBKEY_FILE).is_none());
     }
 }

@@ -1,0 +1,8 @@
+# LimeWall gallery signing — Ed25519 public key (base64 of the 32 raw bytes).
+#
+# EMPTY (only these comments) = signing NOT enabled: the client verifies HTTPS +
+# per-pack SHA-256, exactly as today. Nothing breaks.
+#
+# To enable: run `node gallery/keygen.mjs` (fills this file + writes the private
+# key OUTSIDE git), then rebuild/ship the app and sign the catalog with
+# `node gallery/sign-catalog.mjs`. See gallery/README.md.

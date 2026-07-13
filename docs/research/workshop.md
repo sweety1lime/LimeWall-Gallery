@@ -66,7 +66,10 @@ type, license, sha256, size, preview, download_url, tags, published_at }] }`.
 ## Отзыв (revocation) — реализовано в v1
 
 Слой 4 выше описывает целевую модель (подпись Ed25519 + revocation). Подпись
-**отложена** (см. security-model.md), но клиентский **kill-switch реализован**:
+**реализована опционально** (клиент проверяет Ed25519 над байтами `catalog.json`,
+если задан публичный ключ; иначе — как раньше, HTTPS+SHA-256; см.
+`gallery/README.md` → «Подпись каталога» и `keygen.mjs`/`sign-catalog.mjs`).
+Клиентский **kill-switch (revocation) реализован**:
 
 - `gallery/revocation.json` — `{ version, revoked: [{ id, sha256?, reason? }] }`.
   Инвариант (проверяет `validate.mjs`): отозванного пака **нет в каталоге** —

@@ -14,3 +14,7 @@
 # Generated/tooling text stays LF so the CI catalog drift-check is stable.
 gallery/catalog.json text eol=lf
 gallery/*.mjs text eol=lf
+# Signing inputs must be byte-stable: the client verifies the catalog bytes, and
+# the public key is compiled in / read by CI.
+gallery/pubkey.ed25519 text eol=lf
+gallery/catalog.json.sig text eol=lf

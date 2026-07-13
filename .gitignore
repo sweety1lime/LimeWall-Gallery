@@ -7,6 +7,9 @@
 # Canonical GNU license texts (see scripts/fetch-licenses.ps1)
 /licenses/vendor
 
+# Offline gallery signing key — NEVER commit (see gallery/keygen.mjs)
+/gallery/private-key.ed25519
+
 # Portable build output (scripts/build-portable.ps1)
 /dist
 

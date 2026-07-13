@@ -84,6 +84,7 @@
 | tauri-plugin-dialog 2 / tauri-plugin-opener 2 | MIT OR Apache-2.0 | нативный файловый диалог; открытие ссылок |
 | dirs 6 | MIT OR Apache-2.0 | путь к %APPDATA% (библиотека) |
 | sha2 0.10 | MIT OR Apache-2.0 | content-id элементов библиотеки |
+| ring 0.17 | ISC AND MIT AND OpenSSL (permissive, без copyleft) | Ed25519-проверка подписи каталога; уже транзитивно через ureq/rustls |
 | base64 0.22 | MIT OR Apache-2.0 | превью через invoke |
 | zip 8 | MIT | контейнер .wpk (crates/wpk) |
 | windows-registry 0.5 | MIT OR Apache-2.0 | ассоциация .wpk в HKCU |

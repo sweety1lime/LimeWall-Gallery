@@ -4096,6 +4096,7 @@ dependencies = [
  "dirs",
  "ipc",
  "platform",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

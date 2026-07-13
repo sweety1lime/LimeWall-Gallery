@@ -26,3 +26,5 @@ jobs:
             || { echo "::error::catalog.json is stale — run: node gallery/build-catalog.mjs"; exit 1; }
       - name: Validate catalog.json
         run: node gallery/validate.mjs
+      - name: Catalog signature (when signing is enabled)
+        run: node gallery/verify-signature.mjs
