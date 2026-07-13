@@ -1,0 +1,7 @@
+# Funnel reports through the forms so bug reports always carry the diagnostics
+# report. General ideas/questions use the feature form.
+blank_issues_enabled: false
+contact_links:
+  - name: "Свои обои в каталог"
+    url: "https://github.com/sweety1lime/LimeWall-Gallery/blob/master/gallery/README.md"
+    about: "Как предложить обои в общий каталог (только видео/картинки, через Pull Request)."

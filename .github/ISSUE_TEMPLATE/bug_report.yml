@@ -1,0 +1,74 @@
+name: "Баг / Bug report"
+description: "Что-то не работает — сообщи с отчётом диагностики"
+title: "[Баг]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что помогаешь с бетой! Пожалуйста, приложи **отчёт диагностики** —
+        без него баг почти невозможно найти. Он же содержит версию LimeWall.
+  - type: textarea
+    id: what
+    attributes:
+      label: "Что случилось?"
+      description: "Опиши проблему и что ты ожидал(а) увидеть."
+      placeholder: "Например: поставил видео на второй монитор — обои не появились, экран чёрный."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Как повторить"
+      description: "Шаги по порядку — так баг находится быстрее."
+      placeholder: |
+        1. Открыл LimeWall
+        2. Библиотека → «Выбрать файлы» → video.mp4
+        3. Навёл на монитор 2
+        4. ...
+    validations:
+      required: false
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: "Отчёт диагностики"
+      description: "В приложении: значок настроек → раздел «Диагностика» → «Проверить» → «Скопировать отчёт», и вставь сюда."
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: "Версия Windows"
+      description: "Нажми Win+R, введи winver, перепиши строку версии."
+      placeholder: "Windows 10 22H2 (build 19045) / Windows 11 24H2 (build 26100)"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: "Тип обоев"
+      options:
+        - "Видео"
+        - "Картинка"
+        - "Веб (HTML)"
+        - "3D (glTF)"
+        - "Из каталога"
+        - "Не относится / не знаю"
+    validations:
+      required: false
+  - type: textarea
+    id: log
+    attributes:
+      label: "Лог (по желанию)"
+      description: "Открой в блокноте %APPDATA%\\LimeWall\\daemon.log и вставь последние строки."
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: "Перед отправкой"
+      options:
+        - label: "Я поискал(а) — такого бага ещё нет в Issues"
+          required: false

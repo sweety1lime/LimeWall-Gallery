@@ -1,0 +1,26 @@
+name: "Идея / Feature request"
+description: "Предложить фичу, улучшение или задать вопрос"
+title: "[Идея]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Какую задачу решаем?"
+      description: "Что сейчас неудобно или чего не хватает."
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: "Что предлагаешь?"
+      description: "Как это могло бы работать (если есть мысли)."
+    validations:
+      required: false
+  - type: textarea
+    id: alt
+    attributes:
+      label: "Альтернативы / примеры"
+      description: "Как это сделано в других приложениях, если видел(а)."
+    validations:
+      required: false
