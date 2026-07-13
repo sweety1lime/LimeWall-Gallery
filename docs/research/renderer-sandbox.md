@@ -116,7 +116,7 @@ WorkerW/WebView2. Эффект скромный, но реальный и мал
 2. **Web/3D** — оставить как есть: песочница WebView2 + CSP; ничего не ослаблять.
 3. **Фаза 2 (перед UGC / когда оправдано)** — вынести декодер в
    AppContainer-child через libmpv render API + shared-texture; host держит
-   WorkerW. Оформить отдельным дизайном перед реализацией.
+   WorkerW. Дизайн и план спайка: [renderer-sandbox-phase2.md](renderer-sandbox-phase2.md).
 4. **Полный AppContainer на весь процесс — не делаем** (UIPI vs WorkerW).
 
 ## Проверить спайком перед кодом Фазы 2
