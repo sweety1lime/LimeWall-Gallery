@@ -269,3 +269,114 @@ impl Drop for Player {
         unsafe { (self.api.ffi.terminate_destroy)(self.handle) };
     }
 }
+
+/// Software-mode render context: libmpv renders frames straight into a CPU pixel
+/// buffer, with no GL/EGL context. This is the foundation for the phase-2
+/// decoder that renders off-screen so it can run sandboxed
+/// (docs/research/renderer-sandbox-phase2.md).
+///
+/// Borrows its [`Player`] so it is always freed before the player is destroyed,
+/// which libmpv requires.
+pub struct RenderContext<'a> {
+    player: &'a Player,
+    ctx: *mut ffi::mpv_render_context,
+}
+
+impl<'a> RenderContext<'a> {
+    /// Creates a software render context. The player must have been created with
+    /// `vo=libmpv`.
+    pub fn new_sw(player: &'a Player) -> Result<Self> {
+        let api_type = c"sw";
+        let mut params = [
+            ffi::mpv_render_param {
+                kind: ffi::MPV_RENDER_PARAM_API_TYPE,
+                data: api_type.as_ptr().cast::<c_void>().cast_mut(),
+            },
+            ffi::mpv_render_param {
+                kind: ffi::MPV_RENDER_PARAM_INVALID,
+                data: std::ptr::null_mut(),
+            },
+        ];
+        let mut ctx: *mut ffi::mpv_render_context = std::ptr::null_mut();
+        let code = unsafe {
+            (player.api.ffi.render_context_create)(&raw mut ctx, player.handle, params.as_mut_ptr())
+        };
+        player.api.check("mpv_render_context_create", code)?;
+        Ok(Self { player, ctx })
+    }
+
+    /// True when libmpv has a new frame ready to be rendered.
+    pub fn frame_ready(&self) -> bool {
+        let flags = unsafe { (self.player.api.ffi.render_context_update)(self.ctx) };
+        flags & ffi::MPV_RENDER_UPDATE_FRAME != 0
+    }
+
+    /// Renders the current frame into `buffer` as `width`x`height` pixels of the
+    /// software `format` (e.g. `"rgb0"`, 4 bytes/pixel) with `stride` bytes per
+    /// row. `buffer` must hold at least `stride * height` bytes.
+    pub fn render_sw(
+        &self,
+        width: i32,
+        height: i32,
+        format: &str,
+        stride: usize,
+        buffer: &mut [u8],
+    ) -> Result<()> {
+        let needed = stride.saturating_mul(height.max(0) as usize);
+        assert!(buffer.len() >= needed, "render buffer too small");
+        let format_c = cstring(format)?;
+        let mut size = [width, height];
+        let mut stride = stride;
+        let mut params = [
+            ffi::mpv_render_param {
+                kind: ffi::MPV_RENDER_PARAM_SW_SIZE,
+                data: size.as_mut_ptr().cast::<c_void>(),
+            },
+            ffi::mpv_render_param {
+                kind: ffi::MPV_RENDER_PARAM_SW_FORMAT,
+                data: format_c.as_ptr().cast::<c_void>().cast_mut(),
+            },
+            ffi::mpv_render_param {
+                kind: ffi::MPV_RENDER_PARAM_SW_STRIDE,
+                data: (&raw mut stride).cast::<c_void>(),
+            },
+            ffi::mpv_render_param {
+                kind: ffi::MPV_RENDER_PARAM_SW_POINTER,
+                data: buffer.as_mut_ptr().cast::<c_void>(),
+            },
+            ffi::mpv_render_param {
+                kind: ffi::MPV_RENDER_PARAM_INVALID,
+                data: std::ptr::null_mut(),
+            },
+        ];
+        let code =
+            unsafe { (self.player.api.ffi.render_context_render)(self.ctx, params.as_mut_ptr()) };
+        self.player.api.check("mpv_render_context_render", code)
+    }
+}
+
+impl Drop for RenderContext<'_> {
+    fn drop(&mut self) {
+        unsafe { (self.player.api.ffi.render_context_free)(self.ctx) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Resolves every symbol — including the render API just added — against the
+    /// pinned libmpv build when present. Catches a mistyped render symbol name
+    /// that would otherwise only surface at runtime.
+    #[test]
+    fn resolves_all_symbols_against_real_libmpv() {
+        let dll = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/mpv/unpacked/libmpv-2.dll");
+        if !dll.is_file() {
+            eprintln!("skipped: libmpv not fetched");
+            return;
+        }
+        let api = Api::load_from(&dll).expect("all symbols (incl. render API) must resolve");
+        assert_eq!(api.version().0, 2, "expected client API v2.x");
+    }
+}

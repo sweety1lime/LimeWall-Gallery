@@ -32,6 +32,34 @@ pub struct mpv_event {
     pub data: *mut c_void,
 }
 
+// ---------------------------------------------------------------------------
+// Render API (render.h): offscreen rendering for the phase-2 decoder sandbox.
+// Software mode ("sw") makes libmpv render frames straight into a CPU buffer —
+// no GL/EGL context — which is the cheapest way to prove the pipeline.
+// ---------------------------------------------------------------------------
+
+/// Opaque render context handle.
+pub type mpv_render_context = c_void;
+
+// mpv_render_param_type values (render.h). The SW group is 17..=20.
+pub const MPV_RENDER_PARAM_INVALID: c_int = 0;
+pub const MPV_RENDER_PARAM_API_TYPE: c_int = 1;
+pub const MPV_RENDER_PARAM_SW_SIZE: c_int = 17;
+pub const MPV_RENDER_PARAM_SW_FORMAT: c_int = 18;
+pub const MPV_RENDER_PARAM_SW_STRIDE: c_int = 19;
+pub const MPV_RENDER_PARAM_SW_POINTER: c_int = 20;
+
+/// `mpv_render_context_update` flag: a new frame is ready to be rendered.
+pub const MPV_RENDER_UPDATE_FRAME: u64 = 1;
+
+/// One entry of the null-terminated `mpv_render_param` array. `kind` is the
+/// C `type` field (renamed — `type` is reserved in Rust).
+#[repr(C)]
+pub struct mpv_render_param {
+    pub kind: c_int,
+    pub data: *mut c_void,
+}
+
 macro_rules! api_table {
     ($( $field:ident : fn($($arg:ty),*) $(-> $ret:ty)? = $symbol:literal; )*) => {
         /// Function table resolved from `libmpv-2.dll`. Keeping the `Library`
@@ -78,4 +106,10 @@ api_table! {
         = "mpv_get_property";
     command: fn(*mut mpv_handle, *mut *const c_char) -> c_int = "mpv_command";
     wait_event: fn(*mut mpv_handle, c_double) -> *mut mpv_event = "mpv_wait_event";
+    render_context_create: fn(*mut *mut mpv_render_context, *mut mpv_handle, *mut mpv_render_param) -> c_int
+        = "mpv_render_context_create";
+    render_context_render: fn(*mut mpv_render_context, *mut mpv_render_param) -> c_int
+        = "mpv_render_context_render";
+    render_context_update: fn(*mut mpv_render_context) -> u64 = "mpv_render_context_update";
+    render_context_free: fn(*mut mpv_render_context) = "mpv_render_context_free";
 }
