@@ -32,6 +32,8 @@ if ($LASTEXITCODE -ne 0) { Pop-Location; throw "UI build failed" }
 Pop-Location
 
 $renderer = Join-Path $repoRoot "target\release\renderer.exe"
+# Windowless daemon: what autostart launches, so no console window at logon.
+$daemon = Join-Path $repoRoot "target\release\limewall-daemon.exe"
 $uiRelease = Join-Path $repoRoot "apps\ui\src-tauri\target\release"
 $ui = Get-ChildItem $uiRelease -Filter "*.exe" |
     Where-Object { $_.Name -in @("LimeWall.exe", "ui.exe") } |
@@ -44,6 +46,7 @@ New-Item -ItemType Directory -Force (Join-Path $out "shaders\anime4k") | Out-Nul
 
 Copy-Item $ui.FullName (Join-Path $out "LimeWall.exe") -Force
 Copy-Item $renderer (Join-Path $out "renderer.exe") -Force
+Copy-Item $daemon (Join-Path $out "limewall-daemon.exe") -Force
 Copy-Item $libmpv $out -Force
 Copy-Item $ffmpeg $out -Force
 Copy-Item (Join-Path $repoRoot "assets\shaders\FSR.glsl") (Join-Path $out "shaders") -Force

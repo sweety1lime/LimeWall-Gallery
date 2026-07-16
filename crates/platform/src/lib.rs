@@ -124,6 +124,8 @@ mod harden_win32;
 #[cfg(windows)]
 mod resources_win32;
 #[cfg(windows)]
+mod stdio_win32;
+#[cfg(windows)]
 mod tray_win32;
 #[cfg(windows)]
 mod watcher_win32;
@@ -184,6 +186,35 @@ pub fn desktop_icons_visible() -> Option<bool> {
     #[cfg(not(windows))]
     {
         None
+    }
+}
+
+/// Command line `app` is registered to run at logon with, or `None` when it is
+/// not registered. Lets callers migrate a registration they wrote earlier.
+pub fn autostart_command(app: &str) -> Result<Option<String>> {
+    #[cfg(windows)]
+    {
+        autostart_win32::command(app)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err(HostError::Unsupported("autostart"))
+    }
+}
+
+/// Sends this process' standard output and error to `path`, replacing any
+/// console or pipe they were attached to. For windowless processes, whose
+/// output would otherwise be dropped.
+pub fn redirect_output_to_file(path: &std::path::Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        stdio_win32::redirect_to_file(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(HostError::Unsupported("output redirection"))
     }
 }
 

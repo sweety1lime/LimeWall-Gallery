@@ -1,12 +1,10 @@
-mod daemon;
-mod playback;
-mod playlist;
-
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+
+use renderer::{daemon, playback};
 
 use playback::Quality;
 
@@ -417,7 +415,16 @@ fn pack(
     println!("sha256: {sha}");
     println!("size:   {size} bytes");
     println!("\nCatalog entry (set download_url after you upload the .wpk):\n");
-    print_catalog_entry(&id, &name, &author, media_kind(media_type), &license, &sha, size, filename);
+    print_catalog_entry(
+        &id,
+        &name,
+        &author,
+        media_kind(media_type),
+        &license,
+        &sha,
+        size,
+        filename,
+    );
     Ok(())
 }
 
@@ -497,7 +504,11 @@ fn sha256_and_size(path: &Path) -> anyhow::Result<(String, u64)> {
         hasher.update(&buffer[..read]);
     }
     let size = file.metadata()?.len();
-    let hex = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let hex = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     Ok((hex, size))
 }
 
@@ -513,7 +524,11 @@ impl Drop for TempFile {
 /// ffmpeg lookup: explicit override, next to the executable, then the dev
 /// checkout download location (scripts/fetch-ffmpeg.ps1).
 fn ffmpeg_path() -> Option<PathBuf> {
-    let exe = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let exe = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
     let mut candidates = Vec::new();
     if let Ok(explicit) = std::env::var("LIMEWALL_FFMPEG") {
         candidates.push(PathBuf::from(explicit));

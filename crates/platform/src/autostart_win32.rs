@@ -36,6 +36,50 @@ pub fn enabled(app: &str) -> Result<bool> {
     }
 }
 
+pub fn command(app: &str) -> Result<Option<String>> {
+    let name = HSTRING::from(app);
+    let mut size = 0u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            RUN_KEY,
+            PCWSTR(name.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_ok() {
+        return Err(registry_err("failed to size the Run key value", status));
+    }
+    let mut buffer = vec![0u16; (size as usize).div_ceil(size_of::<u16>())];
+    let mut size = (buffer.len() * size_of::<u16>()) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            RUN_KEY,
+            PCWSTR(name.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_ok() {
+        return Err(registry_err("failed to read the Run key value", status));
+    }
+    let text = &buffer[..(size as usize) / size_of::<u16>()];
+    let text = text.strip_suffix(&[0]).unwrap_or(text);
+    Ok(Some(String::from_utf16_lossy(text)))
+}
+
 pub fn set(app: &str, command: Option<&str>) -> Result<()> {
     let name = HSTRING::from(app);
     match command {

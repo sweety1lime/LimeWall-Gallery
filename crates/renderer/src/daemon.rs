@@ -28,6 +28,87 @@ const STATE_VERSION: u32 = 1;
 /// Name of the Run-key value used for autostart.
 const AUTOSTART_APP: &str = "LimeWall";
 
+/// Windowless daemon binary, the one autostart must launch.
+const DAEMON_EXE: &str = if cfg!(windows) {
+    "limewall-daemon.exe"
+} else {
+    "limewall-daemon"
+};
+
+/// The CLI binary, which serves the daemon too — but with a console attached.
+const RENDERER_EXE: &str = if cfg!(windows) {
+    "renderer.exe"
+} else {
+    "renderer"
+};
+
+/// Command autostart should run, given the path of the executable doing the
+/// registering: the windowless daemon sitting next to it, so that no console
+/// window shows up at logon. Falls back to `renderer serve` when that binary is
+/// missing, which costs the user a console window but still restores wallpapers.
+fn autostart_command_for(exe: &Path) -> String {
+    match exe.parent().map(|dir| dir.join(DAEMON_EXE)) {
+        Some(daemon) if daemon.is_file() => format!("\"{}\"", daemon.display()),
+        _ => format!("\"{}\" serve", exe.display()),
+    }
+}
+
+/// The executable a `"<path>" serve` registration launches, or `None` for
+/// anything else — including a registration already pointing at the windowless
+/// daemon, which takes no arguments.
+fn console_autostart_target(command: &str) -> Option<&str> {
+    let rest = command.trim().strip_prefix('"')?;
+    let (path, args) = rest.split_once('"')?;
+    args.trim().eq_ignore_ascii_case("serve").then_some(path)
+}
+
+/// Whether a console-based registration should be replaced by this install.
+///
+/// It should when it belongs to this install, and also when the executable it
+/// names is gone: a portable copy unpacked into a new folder leaves the Run key
+/// pointing at the deleted one, where it starts nothing at all. A registration
+/// naming another install that still exists is left to that install.
+fn should_migrate_autostart(command: &str, exe: &Path) -> bool {
+    let Some(target) = console_autostart_target(command) else {
+        return false;
+    };
+    let target = Path::new(target);
+    let same_install = match (target.parent(), exe.parent()) {
+        (Some(theirs), Some(ours)) => {
+            theirs.as_os_str().eq_ignore_ascii_case(ours.as_os_str())
+                && target.file_name() == Some(RENDERER_EXE.as_ref())
+        }
+        _ => false,
+    };
+    same_install || !target.exists()
+}
+
+/// Repoints an existing autostart registration at the windowless daemon.
+///
+/// Beta testers already have `renderer.exe serve` in their Run key, which greets
+/// them with a console window at every logon; they must not have to toggle the
+/// setting off and on to get the fix.
+fn migrate_autostart() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let current = match platform::autostart_command(AUTOSTART_APP) {
+        Ok(Some(command)) => command,
+        _ => return,
+    };
+    if !should_migrate_autostart(&current, &exe) {
+        return;
+    }
+    let command = autostart_command_for(&exe);
+    if command == current {
+        return;
+    }
+    match platform::set_autostart(AUTOSTART_APP, Some(&command)) {
+        Ok(()) => println!("autostart migrated to the windowless daemon: {command}"),
+        Err(error) => eprintln!("failed to migrate autostart: {error}"),
+    }
+}
+
 pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<()> {
     let endpoint = endpoint
         .map(str::to_owned)
@@ -39,6 +120,7 @@ pub fn run(endpoint: Option<&str>, state_path: Option<&Path>) -> anyhow::Result<
     let server = ipc::LocalServer::bind(&endpoint)
         .with_context(|| format!("failed to bind renderer endpoint {endpoint:?}"))?;
     println!("renderer daemon listening at {endpoint}");
+    migrate_autostart();
 
     let (message_tx, message_rx) = mpsc::channel::<Message>();
     let request_tx = message_tx.clone();
@@ -600,7 +682,7 @@ impl DaemonState {
         let command = if enabled {
             let exe = std::env::current_exe()
                 .map_err(|error| internal(format!("cannot resolve own path: {error}")))?;
-            Some(format!("\"{}\" serve", exe.display()))
+            Some(autostart_command_for(&exe))
         } else {
             None
         };
@@ -1652,6 +1734,51 @@ mod tests {
         let monitors = [monitor(0, r"\\.\DISPLAY1")];
         let resolved = resolve_restore_monitor(&entry(3, r"\\.\DISPLAY4"), &monitors);
         assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn autostart_falls_back_to_the_cli_when_the_daemon_binary_is_missing() {
+        let exe = PathBuf::from("nowhere").join(RENDERER_EXE);
+        let command = autostart_command_for(&exe);
+        assert!(command.ends_with(" serve"), "{command}");
+    }
+
+    #[test]
+    fn console_autostart_of_our_own_install_is_migrated() {
+        let dir = PathBuf::from(r"C:\Program Files\LimeWall");
+        let exe = dir.join(DAEMON_EXE);
+        let old = format!("\"{}\" serve", dir.join(RENDERER_EXE).display());
+        assert!(should_migrate_autostart(&old, &exe));
+        // The registry hands the path back as it was written.
+        assert!(should_migrate_autostart(&old.to_uppercase(), &exe));
+    }
+
+    #[test]
+    fn autostart_of_a_vanished_install_is_taken_over() {
+        // The tester unpacked the new build elsewhere and dropped the old
+        // folder: that registration starts nothing, so it is ours to fix.
+        let exe = PathBuf::from(r"C:\Portable\LimeWall-new").join(DAEMON_EXE);
+        let gone = r#""C:\Portable\LimeWall-old\renderer.exe" serve"#;
+        assert!(should_migrate_autostart(gone, &exe));
+    }
+
+    #[test]
+    fn autostart_of_a_live_install_elsewhere_is_left_alone() {
+        // A copy whose files still exist keeps owning its registration; the
+        // test binary stands in for one.
+        let live = std::env::current_exe().expect("test binary path");
+        let exe = PathBuf::from(r"C:\Program Files\LimeWall").join(DAEMON_EXE);
+        let other = format!("\"{}\" serve", live.display());
+        assert!(!should_migrate_autostart(&other, &exe));
+    }
+
+    #[test]
+    fn already_migrated_autostart_is_not_touched() {
+        let exe = PathBuf::from(r"C:\Program Files\LimeWall").join(DAEMON_EXE);
+        // The windowless daemon takes no arguments: not a `serve` command.
+        let migrated = format!("\"{}\"", exe.display());
+        assert!(!should_migrate_autostart(&migrated, &exe));
+        assert_eq!(console_autostart_target("not even quoted"), None);
     }
 
     #[test]
